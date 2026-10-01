@@ -1,8 +1,11 @@
 name: Bug report
-description: Report a reproducible problem in Aldad
+about: Report a reproducible problem in Aldad
 title: "[Bug] "
-labels: ["bug"]
+labels: [bug]
 body:
+  - type: markdown
+    attributes:
+      value: "شكراً لمساعدة الضاد. اكتب مثالاً صغيراً يعيد المشكلة."
   - type: input
     id: version
     attributes:
@@ -26,6 +29,7 @@ body:
     id: code
     attributes:
       label: Minimal Aldad code
+      description: أصغر كود يكرر المشكلة
       render: text
     validations:
       required: true
@@ -38,6 +42,6 @@ body:
   - type: textarea
     id: actual
     attributes:
-      label: Actual result or error
+      label: Actual result / error
     validations:
       required: true

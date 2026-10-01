@@ -7,6 +7,6 @@
 ## Tests
 
 - [ ] Existing current tests pass
-- [ ] Added or updated a regression test
-- [ ] No syntax was added only to satisfy a test
+- [ ] Added/updated a regression test for the bug or rule change
+- [ ] No new syntax was added only to satisfy a test
 - [ ] Ambiguous input still fails clearly instead of being guessed

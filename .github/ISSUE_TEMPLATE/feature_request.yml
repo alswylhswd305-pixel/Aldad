@@ -1,13 +1,16 @@
 name: Feature request
-description: Suggest a change to Aldad
+about: Suggest a change to Aldad
 title: "[Feature] "
-labels: ["enhancement"]
+labels: [enhancement]
 body:
+  - type: markdown
+    attributes:
+      value: "الضاد تفضّل القواعد القليلة والواضحة. وضّح المشكلة أولاً قبل اقتراح أمر جديد."
   - type: textarea
     id: problem
     attributes:
       label: Problem to solve
-      description: What problem cannot the current rules express clearly?
+      description: ما المشكلة التي لا تستطيع القواعد الحالية حلها بوضوح؟
     validations:
       required: true
   - type: textarea
@@ -16,3 +19,8 @@ body:
       label: Proposed behavior
     validations:
       required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Example Aldad code
+      render: text
