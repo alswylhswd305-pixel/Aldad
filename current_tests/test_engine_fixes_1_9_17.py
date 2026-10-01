@@ -154,3 +154,25 @@ def test_malformed_calculation_is_rejected(tmp_path, expr):
     r = run_program(tmp_path, f'احسب {expr}')
     assert r.returncode != 0
     assert '⚠' in r.stderr
+
+
+def test_comparator_words_inside_multiword_name_are_not_stolen(tmp_path):
+    src = """احفظ «نعم» في إذا كان الطالب ناجحا أم لا
+إذا إذا كان الطالب ناجحا أم لا يساوي «نعم»
+    قول «نجح اختبار الاسم»
+وإلا
+    قول «فشل اختبار الاسم»"""
+    r = run_program(tmp_path, src)
+    assert r.returncode == 0, r.stderr
+    assert out_lines(r)[-1] == 'نجح اختبار الاسم'
+
+
+def test_not_equal_comparator_still_works_after_name_collision_fix(tmp_path):
+    src = """احفظ «نعم» في الحالة
+إذا الحالة لا يساوي «لا»
+    قول «صحيح»
+وإلا
+    قول «خطأ»"""
+    r = run_program(tmp_path, src)
+    assert r.returncode == 0, r.stderr
+    assert out_lines(r)[-1] == 'صحيح'
