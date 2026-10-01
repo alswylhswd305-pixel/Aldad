@@ -1,0 +1,2 @@
+Aldad is licensed under the MIT License. See the full LICENSE file in this repository.
+Copyright (c) 2026 Saud.
