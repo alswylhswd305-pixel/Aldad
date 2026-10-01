@@ -1,0 +1,38 @@
+{
+  "name": "aldad",
+  "displayName": "الضاد 1.9.17 — لغة عربية بسيطة",
+  "description": "أوامر عربية طبيعية، حساب وسياق ثابتان، أسئلة أثناء التنفيذ، ورسائل خطأ عربية. يعمل المحرك بدون إنترنت.",
+  "version": "2.9.17",
+  "publisher": "saud",
+  "license": "MIT",
+  "engines": {"vscode": "^1.80.0"},
+  "categories": ["Programming Languages","Snippets","Education"],
+  "activationEvents": ["onStartupFinished","onLanguage:dad","onCustomEditor:dad.rtlEditor"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [{
+      "id": "dad",
+      "aliases": ["الضاد","Dad"],
+      "extensions": [".ضاد",".dad"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "dad",
+      "scopeName": "source.dad",
+      "path": "./syntaxes/dad.tmLanguage.json"
+    }],
+    "commands": [
+      {"command":"dad.run","title":"الضاد: شغّل الملف","icon":"$(play)","category":"الضاد"},
+      {"command":"dad.toPython","title":"الضاد: اعرض نسخة Python","category":"الضاد"},
+      {"command":"dad.readArabic","title":"الضاد: اقرأ ملف Python بالعربي","category":"الضاد"},
+      {"command":"dad.newFile","title":"الضاد: ملف جديد","category":"الضاد"}
+    ],
+    "keybindings": [{"command":"dad.run","key":"ctrl+alt+r","when":"editorLangId == dad"}],
+    "customEditors": [{
+      "viewType":"dad.rtlEditor",
+      "displayName":"محرر الضاد (من اليمين لليسار)",
+      "selector":[{"filenamePattern":"*.ضاد"},{"filenamePattern":"*.dad"}],
+      "priority":"default"
+    }]
+  }
+}
