@@ -1,7 +1,80 @@
-# Aldad
+# الضاد — Aldad
 
-[![Aldad tests](https://github.com/alswylhswd305-pixel/Aldad/actions/workflows/tests.yml/badge.svg)](https://github.com/alswylhswd305-pixel/Aldad/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-1.9.17%20Preview-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+**الضاد (Aldad)** لغة برمجة عربية مبسطة للمبتدئين، بأوامر عربية قصيرة وقواعد واضحة، وبدون تخمين قصد المستخدم.
 
-    Aldad — Arabic Programming Language for Beginners
+> الإصدار الحالي: **1.9.17 Preview**
+
+## مثال سريع
+
+```dad
+اسأل كم العدد ثم احسب العدد ضرب 2 ثم قول الناتج
+```
+
+```dad
+احفظ 10 في العدد
+إذا العدد أكبر من أو يساوي 10
+    قول نعم
+وإلا
+    قول لا
+```
+
+## مبادئ الضاد
+
+- `ثم` تنفذ الأوامر بالترتيب.
+- `كم` تعني أن البرنامج يحتاج قيمة من المستخدم.
+- `احسب` تحفظ آخر نتيجة في `الناتج`.
+- `كمل` تتابع آخر قيمة فعالة ناجحة.
+- الجملة الغامضة تتوقف بخطأ عربي واضح بدل التخمين.
+- التنفيذ الأساسي يعمل بدون إنترنت أو نموذج ذكاء اصطناعي.
+
+## التشغيل
+
+### Windows
+
+ثبّت Python 3.9 أو أحدث ثم شغّل:
+
+`START_ALDAD.cmd`
+
+### Linux / macOS
+
+```bash
+python3 aldad_ide.py
+```
+
+تشغيل ملف ضاد مباشرة:
+
+```bash
+python3 dad.py run examples/receipt.dad
+```
+
+## الاختبارات
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest current_tests
+```
+
+## المشروع
+
+- `dad.py` — المشغل الرئيسي.
+- `vnext.py` — محلل وفهم أوامر اللغة.
+- `aldad_syntax.py` — القواعد النصية والأخطاء.
+- `aldad_runtime.py` — الحساب والسياق.
+- `ui.py` — الواجهات المحلية.
+- `aldad_ide.py` — بيئة الضاد.
+- `vscode/` — إضافة VS Code.
+- `examples/` — أمثلة.
+- `current_tests/` — اختبارات الإصدار الحالي.
+- `tests_legacy/` — اختبارات التوافق القديمة.
+
+## الحالة الحالية
+
+1.9.17 منشور كـ **Preview** وليس Stable. نجاح الاختبارات المسجلة لا يعني أن اللغة مكتملة أو بلا أخطاء، وما زال اختبار Windows الفعلي الكامل مطلوبًا قبل إصدار Stable جديد.
+
+## المؤسس والترخيص
+
+**Saud** — مؤسس ومطوّر لغة الضاد.
+
+المشروع مجاني ومفتوح المصدر تحت **MIT License**.
+
+English overview: [README_EN.md](README_EN.md)
