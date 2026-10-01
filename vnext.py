@@ -853,33 +853,73 @@ def _logical_token_is_inside_comparator(norm, pos):
 
 
 def parse_cond(text, names: Names):
-    """Boolean groups have ordinary precedence: grouping, comparison, و, أو."""
+    """Boolean groups have ordinary precedence: grouping, comparison, و, أو.
+
+    المقارنات لا تُحسم من شكل الكلمات وحده. قد تكون كلمات مثل «لا يساوي»
+    جزءًا من اسم متغير مركب؛ لذلك لا نعتمد عامل المقارنة إلا إذا كان ما قبله
+    قيمة/اسمًا صالحًا فعلًا.
+    """
     def condition(tk):
-        if not tk: raise DadError("الشرط ناقص.")
+        if not tk:
+            raise DadError("الشرط ناقص.")
         while tk[0] == "(" and tk[-1] == ")" and one_group(" ".join(tk)):
             tk = tk[1:-1]
-            if not tk: raise DadError("الشرط ناقص داخل الأقواس.")
+            if not tk:
+                raise DadError("الشرط ناقص داخل الأقواس.")
         norm = [nk(t) for t in tk]
+
         for join, symbol in (("او", "or"), ("و", "and")):
             depth = 0
             for i, token in enumerate(tk):
-                if token == "(": depth += 1
-                elif token == ")": depth -= 1
+                if token == "(":
+                    depth += 1
+                elif token == ")":
+                    depth -= 1
                 elif (depth == 0 and norm[i] == join
                       and not _logical_token_is_inside_comparator(norm, i)
-                      and _has_cmp(norm[:i]) and _has_cmp(norm[i+1:])):
-                    return f"({condition(tk[:i])} {symbol} {condition(tk[i+1:])})"
+                      and _has_cmp(norm[:i]) and _has_cmp(norm[i + 1:])):
+                    try:
+                        left_cond = condition(tk[:i])
+                        right_cond = condition(tk[i + 1:])
+                    except DadError:
+                        continue
+                    return f"({left_cond} {symbol} {right_cond})"
+
+        candidates = []
+        first_error = None
         depth = 0
         for i, token in enumerate(tk):
-            if token == "(": depth += 1
-            elif token == ")": depth -= 1
-            elif depth == 0:
-                hit = _find_cmp(norm, i)
-                if hit:
-                    length, symbol = hit
-                    left = _operand(tk[:i], names, "left")
-                    right = _operand(tk[i+length:], names, "right")
-                    return f"({left} {symbol} {right})"
+            if token == "(":
+                depth += 1
+                continue
+            if token == ")":
+                depth -= 1
+                continue
+            if depth != 0:
+                continue
+            hit = _find_cmp(norm, i)
+            if not hit:
+                continue
+            length, symbol = hit
+            try:
+                left = _operand(tk[:i], names, "left")
+                right = _operand(tk[i + length:], names, "right")
+            except DadError as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            candidates.append((i, length, symbol, left, right))
+
+        if len(candidates) == 1:
+            _, _, symbol, left, right = candidates[0]
+            return f"({left} {symbol} {right})"
+        if len(candidates) > 1:
+            raise DadError(
+                f"الشرط ملتبس في «{' '.join(tk)}»: كلمات المقارنة تظهر أيضًا داخل اسم معروف. "
+                "غيّر اسم المتغير أو بسّط الشرط حتى يكون عامل المقارنة واضحًا."
+            )
+        if first_error is not None:
+            raise first_error
         raise DadError(f"ما لقيت مقارنة في «{' '.join(tk)}». استخدم أكبر من أو أصغر من أو يساوي.")
     return {"op":"IF", "cond":condition(tokens(text.strip().rstrip(":")))}
 
