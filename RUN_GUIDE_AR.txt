@@ -1,0 +1,25 @@
+تشغيل Aldad 1.9.17
+
+فك الضغط أولًا. على Windows افتح START_ALDAD.cmd؛ إذا تعذر البدء افتح REPAIR_ALDAD.cmd.
+على Linux/macOS شغّل: python3 aldad_ide.py
+البرنامج يفتح محررًا عربيًا في المتصفح ويحفظ البرامج في مجلد عمله.
+
+تشغيل مباشر:
+python3 dad.py run examples/receipt.dad
+اكتب 5 ثم 3 عند السؤال. يظهر 15 ثم 17، ويبقى السعر الأصلي 5.
+
+الطرفية:
+python3 dad.py repl
+هذا بروتوكول JSON تستخدمه الواجهة. افتح الطرفية من IDE للاستخدام العادي.
+السؤال في الطرفية يوقف التنفيذ مؤقتًا، ثم يتابع نفس البرنامج بعد الإجابة.
+
+الواجهة المستقلة:
+python3 dad.py run examples/interactive_invoice.dad
+ينشئ ملف HTML محليًا. افتحه في المتصفح، أدخل السعر والكمية واضغط الزر.
+
+VS Code:
+Extensions > Install from VSIX > Aldad_VSCode_1.9.17.vsix
+Ctrl+Alt+R أو زر شغّل. الأسئلة تظهر وقت تنفيذها، بما فيها الأسئلة داخل الحلقة.
+
+بناء EXE اختياري على Windows: BUILD_ALDAD_IDE_EXE.cmd
+لم تُبنَ أو تُختبَر نسخة EXE في هذا التسليم. المصدر ورسائل التشغيل هما المرفقان.

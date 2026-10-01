@@ -57,10 +57,13 @@ def evaluate(expr, global_scope, local_scope, continuing=False):
         if isinstance(node, ast.BinOp) and type(node.op) in OPS:
             a, b = number(walk(node.left)), number(walk(node.right))
             if isinstance(node.op, ast.Pow) and isinstance(b, (int, float)):
-                if isinstance(b, float) and b.is_integer(): b = int(b)
+                # نرفض الأس الذي سيولد عددًا عملاقًا قبل بنائه في الذاكرة.
+                if isinstance(b, float) and b.is_integer():
+                    b = int(b)
                 if isinstance(b, int) and b >= 0 and isinstance(a, int) and abs(a) > 1:
                     estimated_bits = int(math.log2(abs(a)) * b) + 1
-                    if estimated_bits > MAX_INT_BITS: _too_large()
+                    if estimated_bits > MAX_INT_BITS:
+                        _too_large()
                 elif isinstance(b, (int, float)) and b > 4096 and abs(a) > 1:
                     _too_large()
             try: val = OPS[type(node.op)](a, b)

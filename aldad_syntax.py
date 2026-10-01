@@ -39,6 +39,7 @@ def spans(text):
 
 
 def strip_comment(text):
+    # A comment is discarded only outside a quoted string.
     i = 0
     while i < len(text):
         ch = text[i]
