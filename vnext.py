@@ -1275,6 +1275,7 @@ _DEFINE_RET_RE = re.compile(r"\s+(?:و?يرجع|و?ترجع|و?أرجع|و?ار�
 _DEFINE_TAKES_RE = re.compile(r"^(?:ياخذ|يأخذ|ياخد|يأخد|يستقبل|مدخلاته?|معاملاته?)\s+(.+)$")
 _DEFINE_TAKES_WORD_RE = re.compile(r"\s+(?P<word>ياخذ|يأخذ|ياخد|يأخد|يستقبل|مدخلاته?|معاملاته?)\s+")
 _DEFINE_NONE_RE = re.compile(r"^(?:بدون\s+(?:مدخلات|معاملات|قيم)|ما\s+ياخذ\s+شي|ما\s+يأخذ\s+شي)\s*$")
+_DEFINE_NONE_WORD_RE = re.compile(r"\s+(?P<none>بدون\s+(?:مدخلات|معاملات|قيم)|ما\s+ياخذ\s+شي|ما\s+يأخذ\s+شي)\s*$")
 
 
 def _copy_names(names):
@@ -1323,12 +1324,17 @@ def _split_define(text):
     if mr:
         ret = mr.group(1).strip().rstrip(':').strip()
         body = body[:mr.start()].strip()
-    mt = _DEFINE_TAKES_WORD_RE.search(body)
-    if mt:
-        name = body[:mt.start()].strip()
-        rest = f"{mt.group('word')} {body[mt.end():].strip()}".strip()
+    mn = _DEFINE_NONE_WORD_RE.search(body)
+    if mn:
+        name = body[:mn.start()].strip()
+        rest = mn.group("none").strip()
     else:
-        name, rest = body, ""
+        mt = _DEFINE_TAKES_WORD_RE.search(body)
+        if mt:
+            name = body[:mt.start()].strip()
+            rest = f"{mt.group('word')} {body[mt.end():].strip()}".strip()
+        else:
+            name, rest = body, ""
     if not name:
         raise DadError("«عرّف» تحتاج اسم دالة واضح.")
     return name, rest, ret
