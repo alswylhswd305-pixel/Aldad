@@ -173,7 +173,10 @@ class Names:
         self.by_key = {}
         self.aliases = {}
         self.functions = set()
+        self.function_by_key = {}
+        self.function_labels = {}
         self.labels = {}
+        self.in_function = False
         self._seq = 0
 
     def _safe(self, name):
@@ -227,6 +230,25 @@ class Names:
 
     def label(self, internal):
         return self.labels.get(internal, internal)
+
+    def add_function(self, name):
+        """يسجل اسم دالة عربيًا طبيعيًا، ويعطيه اسمًا داخليًا صالحًا للتنفيذ."""
+        raw = " ".join(str(name).split())
+        k = _phrase_nk(raw)
+        if k in self.function_by_key:
+            return self.function_by_key[k]
+        internal = self._safe(raw)
+        self.function_by_key[k] = internal
+        self.function_labels[internal] = raw
+        self.functions.add(internal)
+        return internal
+
+    def find_function(self, name):
+        raw = " ".join(str(name).split())
+        return self.function_by_key.get(_phrase_nk(raw))
+
+    def function_label(self, internal):
+        return self.function_labels.get(internal, internal)
 
     def match_tokens(self, tk, i):
         """أطول اسم معروف يبدأ عند tk[i]؛ يرجع (الاسم الداخلي، عدد الكلمات)."""
@@ -655,14 +677,27 @@ def _unknown_count(thing):
                     [f"{name} = 12", f"اسأل(كم عدد {name})", f"{name} = [\"بيضة\"، \"بيضة\"]"])
 
 
+_BOOL_LITERALS = {nk("صحيح"): "True", nk("خطأ"): "False"}
+
+
+def _bool_literal(text):
+    return _BOOL_LITERALS.get(nk(" ".join(str(text).split())))
+
+
 def parse_output(text, names: Names):
     t = text.strip()
     if not t:
         return {"op": "OUTPUT", "expr": '""'}
+    b = _bool_literal(t)
+    if b is not None:
+        return {"op": "OUTPUT", "expr": b}
     if len(tokens(t)) == 1 and t[:1] in "\"'«":
         return {"op": "OUTPUT", "expr": json.dumps(_quoted_value(t), ensure_ascii=False)}
     if re.fullmatch(r'[-+]?\d+(?:[.٫]\d+)?', t):
         return {"op": "OUTPUT", "expr": t.translate(AR_DIGITS)}
+    call = _parse_user_call_expr(t, names)
+    if call is not None:
+        return {"op": "OUTPUT", "expr": call}
     if re.match(r"^كم(?:\s|$)", t):
         ask = parse_ask(t, names)
         return {"op": "SEQ", "body": [ask, {"op": "OUTPUT", "expr": ask["var"]}]}
@@ -725,6 +760,71 @@ def parse_output(text, names: Names):
         return {"op": "OUTPUT", "expr": json.dumps(t, ensure_ascii=False),
                 "note": f"«{one}» مو متغير معروف — طبعتها ككلام. إذا تقصد متغير، عرّفه أول."}
     return {"op": "OUTPUT", "expr": json.dumps(t, ensure_ascii=False)}
+
+
+def _split_call_args(text):
+    """يفصل وسائط الدالة عند الفاصلة فقط خارج النصوص والأقواس."""
+    if not text.strip():
+        return []
+    args, buf = [], []
+    depth = 0
+    quote = None
+    escaped = False
+    for ch in text:
+        if quote is not None:
+            buf.append(ch)
+            if quote in ('"', "'") and ch == '\\' and not escaped:
+                escaped = True
+                continue
+            if ch == quote and not escaped:
+                quote = None
+            escaped = False
+            continue
+        if ch == '«':
+            quote = '»'; buf.append(ch); continue
+        if ch in ('"', "'"):
+            quote = ch; buf.append(ch); continue
+        if ch == '(':
+            depth += 1; buf.append(ch); continue
+        if ch == ')':
+            depth -= 1; buf.append(ch); continue
+        if ch in (',', '،') and depth == 0:
+            arg = ''.join(buf).strip()
+            if not arg:
+                raise DadError("في استدعاء الدالة وسيط ناقص بين فاصلتين.")
+            args.append(arg); buf = []; continue
+        buf.append(ch)
+    if quote is not None or depth != 0:
+        raise DadError("أقواس أو علامات نص غير مكتملة في استدعاء الدالة.")
+    arg = ''.join(buf).strip()
+    if arg:
+        args.append(arg)
+    elif args:
+        raise DadError("آخر وسيط في استدعاء الدالة ناقص.")
+    return args
+
+
+def _parse_user_call_expr(text, names):
+    """يحول «اسم دالة طبيعي(وسائط)» إلى استدعاء داخلي صالح للتنفيذ."""
+    t = text.strip()
+    m = re.match(r"^(.+?)\s*\((.*)\)\s*$", t, re.S)
+    if not m:
+        return None
+    raw_name, raw_args = m.group(1).strip(), m.group(2)
+    fn = names.find_function(raw_name)
+    if not fn:
+        return None
+    exprs = []
+    for arg in _split_call_args(raw_args):
+        nested = _parse_user_call_expr(arg, names)
+        if nested is not None:
+            exprs.append(nested)
+            continue
+        out = parse_output(arg, names)
+        if out.get("op") != "OUTPUT":
+            raise DadError(f"وسيط الدالة «{arg}» لازم يكون قيمة جاهزة.")
+        exprs.append(out["expr"])
+    return f"{fn}({', '.join(exprs)})"
 
 
 QUESTION_WORDS = {nk(w) for w in ("كم", "وش", "شو", "شنو", "ايش", "ما", "ماهو", "ماهي", "هل", "متى", "وين", "اين",
@@ -830,6 +930,9 @@ def _operand(tk, names, side):
     text = " ".join(tk)
     if not tk:
         raise DadError("الشرط ناقص.")
+    b = _bool_literal(text)
+    if b is not None:
+        return b
     items = items_of(text, names)
     me = math_expr(items)
     if me:
@@ -1166,10 +1269,11 @@ def parse_repeat(text, names: Names):
 
 
 
-# ============================================================================ الدوال الطبيعية — 1.8
-_DEFINE_RE = re.compile(r"^(?:عرّف|عرف)\s+(?:دالة\s+)?(?:اسمها\s+)?([^\W\d]\w*)\s*(.*?)\s*:?\s*$")
+# ============================================================================ الدوال الطبيعية — 1.9.17
+_DEFINE_PREFIX_RE = re.compile(r"^(?:عرّف|عرف)\s+(?:دالة\s+)?(?:اسمها\s+)?(.+?)\s*$")
 _DEFINE_RET_RE = re.compile(r"\s+(?:و?يرجع|و?ترجع|و?أرجع|و?ارجع)\s+(.+)$")
 _DEFINE_TAKES_RE = re.compile(r"^(?:ياخذ|يأخذ|ياخد|يأخد|يستقبل|مدخلاته?|معاملاته?)\s+(.+)$")
+_DEFINE_TAKES_WORD_RE = re.compile(r"\s+(?P<word>ياخذ|يأخذ|ياخد|يأخد|يستقبل|مدخلاته?|معاملاته?)\s+")
 _DEFINE_NONE_RE = re.compile(r"^(?:بدون\s+(?:مدخلات|معاملات|قيم)|ما\s+ياخذ\s+شي|ما\s+يأخذ\s+شي)\s*$")
 
 
@@ -1179,6 +1283,9 @@ def _copy_names(names):
     n.labels.update(getattr(names, "labels", {}))
     n.aliases.update({k: set(v) for k, v in names.aliases.items()})
     n.functions.update(names.functions)
+    n.function_by_key.update(getattr(names, "function_by_key", {}))
+    n.function_labels.update(getattr(names, "function_labels", {}))
+    n.in_function = getattr(names, "in_function", False)
     n._seq = getattr(names, "_seq", 0)
     return n
 
@@ -1193,7 +1300,6 @@ def _define_params(text):
         raise DadError("بعد اسم الدالة اكتب وش تاخذ، مثل: عرّف جمع ياخذ أ و ب")
     raw = m.group(1).strip()
     raw = re.sub(r"^(?:متغيرات?|قيم|مدخلات)\s+", "", raw)
-    # الفاصلة أو «و» بين الأسماء. ما نفصل الواو الملصوقة داخل الاسم.
     parts = [x.strip() for x in re.split(r"\s*(?:،|,)\s*|\s+و\s+", raw) if x.strip()]
     if not parts:
         raise DadError("ما لقيت أسماء المدخلات بعد «ياخذ».")
@@ -1205,28 +1311,44 @@ def _define_params(text):
     return parts
 
 
-def parse_define(text, names: Names):
-    """عرّف ضعف ياخذ س [ويرجع س ضرب 2] ← def ضعف(س): ..."""
-    t = text.strip()
-    m = _DEFINE_RE.match(t)
+def _split_define(text):
+    """يفصل اسم الدالة الطبيعي عن المدخلات والإرجاع، بدون افتراض أن الاسم كلمة واحدة."""
+    t = text.strip().rstrip(':').strip()
+    m = _DEFINE_PREFIX_RE.match(t)
     if not m:
         return None
-    name, rest = m.group(1), m.group(2).strip()
+    body = m.group(1).strip()
     ret = None
-    mr = _DEFINE_RET_RE.search(" " + rest)
+    mr = _DEFINE_RET_RE.search(body)
     if mr:
-        # +1 لأننا أضفنا مسافة في بداية النص للبحث
-        start = max(0, mr.start() - 1)
         ret = mr.group(1).strip().rstrip(':').strip()
-        rest = rest[:start].strip()
+        body = body[:mr.start()].strip()
+    mt = _DEFINE_TAKES_WORD_RE.search(body)
+    if mt:
+        name = body[:mt.start()].strip()
+        rest = f"{mt.group('word')} {body[mt.end():].strip()}".strip()
+    else:
+        name, rest = body, ""
+    if not name:
+        raise DadError("«عرّف» تحتاج اسم دالة واضح.")
+    return name, rest, ret
+
+
+def parse_define(text, names: Names):
+    """دوال الضاد الطبيعية؛ اسم الدالة قد يكون عدة كلمات."""
+    sig = _split_define(text)
+    if not sig:
+        return None
+    name, rest, ret = sig
     params = _define_params(rest)
     _check_user_name(name)
-    names.functions.add(name)
+    internal = names.add_function(name)
     local = _copy_names(names)
+    local.in_function = True
     for param in params:
         _check_user_name(param)
         local.add(param)
-    ast = {"op": "DEFINE", "name": name, "params": params, "return_expr": None}
+    ast = {"op": "DEFINE", "name": internal, "label": name, "params": params, "return_expr": None}
     if ret:
         out = parse_output(ret, local)
         if out.get("op") != "OUTPUT":
@@ -1241,6 +1363,7 @@ for _w, _c in [("قل", "OUT"), ("قول", "OUT"), ("اطبع", "OUT"), ("اعر
                ("ارسم", "DRAW"), ("رسم", "DRAW"), ("ارسملي", "DRAW"),
                ("إذا", "IF"), ("اذا", "IF"), ("لو", "IF"), ("وإلا إذا", "ELIF"), ("والا اذا", "ELIF"), ("كرر", "REPEAT"),
                ("افتح", "OPEN"), ("احفظ", "SAVE"), ("أضف", "ADD"), ("اضف", "ADD"), ("ضيف", "ADD"),
+               ("أرجع", "RETURN"), ("ارجع", "RETURN"),
                ("اطلب", "AI"), ("أطلب", "AI"), ("حلل", "EXPLAIN"), ("حللي", "EXPLAIN"), ("اشرح", "EXPLAIN")]:
     COMMANDS[nk(_w)] = _c
 
@@ -1249,8 +1372,8 @@ for _w, _c in [("قل", "OUT"), ("قول", "OUT"), ("اطبع", "OUT"), ("اعر
 RESERVED_NAMES = {nk(w) for w in (
     "قل", "قول", "اطبع", "اعرض", "اسأل", "اسال", "احسب", "احسبلي",
     "كمل", "أكمل", "اكمل", "كرر", "إذا", "اذا", "وإلا", "والا", "لكل", "ثم", "كم",
-    "ارسم", "افتح", "احفظ", "أضف", "اضف", "اطلب", "حلل",
-    "الناتج", "الرد", "المحتوى"
+    "ارسم", "افتح", "احفظ", "أضف", "اضف", "أرجع", "ارجع", "اطلب", "حلل",
+    "صحيح", "خطأ", "الناتج", "الرد", "المحتوى"
 )}
 
 def _check_user_name(name):
@@ -1305,7 +1428,7 @@ def _cmd_of(word):
 CALL_RE = re.compile(r"^\s*(وإلا إذا|والا اذا|[^\W\d_]+)\s*\((.*)\)\s*(:?)\s*$")
 
 
-LOOSE_OK = {"OUT", "ASK", "CALC", "CONTINUE", "DRAW", "SAVE", "OPEN", "ADD", "AI", "EXPLAIN"}   # إذا/كرر بدون أقواس = صيغة الضاد القديمة
+LOOSE_OK = {"OUT", "ASK", "CALC", "CONTINUE", "DRAW", "SAVE", "OPEN", "ADD", "RETURN", "AI", "EXPLAIN"}   # إذا/كرر بدون أقواس = صيغة الضاد القديمة
 
 
 def _cmd_words(text):
@@ -1416,11 +1539,12 @@ def parse_statement(text, names: Names, loose=False):
         call_words = re.findall(r"([^\W\d_]\w*)\s*\(", outside)
         nested_call = any(w in names.functions or nk(w) in {nk(x) for x in ('صحيح', 'عشري', 'نص', 'مدى', 'طول', 'مجموع', 'أكبر', 'أصغر', 'قرّب')} for w in call_words)
         nested_call = nested_call or bool(re.search(r'\w+(?:\.\w+)+\s*\(', outside))
+        user_call = _parse_user_call_expr(body, names)
         has_struct = re.search(r"[\[{]", outside)
         has_paren = "(" in outside or ")" in outside
         # الأقواس الحسابية للتجميع جزء رسمي من «احسب»: (2 + 3) × 4.
-        # استدعاء دالة مثل ضعف(5)، والقوائم/القواميس، تظل للمسار القديم.
-        legacy_nested = (has_struct and cmd not in ('SAVE', 'OUT')) or (nested_call and cmd not in ('SAVE', 'CONTINUE', 'IF', 'ELIF'))
+        # استدعاءات دوال الضاد المسجلة نعالجها هنا؛ البقية تبقى للمسار القديم.
+        legacy_nested = (has_struct and cmd not in ('SAVE', 'OUT')) or (nested_call and user_call is None and cmd not in ('SAVE', 'CONTINUE', 'IF', 'ELIF'))
         if nk(m.group(1)) == "اطبع" or (legacy_nested and cmd not in ("EXPLAIN", "AI")):
             return None                                        # صيغة الضاد القديمة / Python — تمشي في المسار القديم
     elif loose:
@@ -1467,6 +1591,15 @@ def parse_statement(text, names: Names, loose=False):
         return parse_save(body, names)
     if cmd == "ADD":
         return parse_add(body, names)
+    if cmd == "RETURN":
+        if not getattr(names, "in_function", False):
+            raise DadError("«أرجع» تستخدم داخل الدالة فقط.")
+        if not body.strip():
+            raise DadError("«أرجع» تحتاج قيمة؛ مثل: أرجع الناتج.")
+        value = parse_output(body, names)
+        if value.get("op") != "OUTPUT":
+            raise DadError("«أرجع» تحتاج قيمة جاهزة أو حسابًا واضحًا.")
+        return {"op": "RETURN", "expr": value["expr"]}
     return None
 
 
@@ -1535,6 +1668,10 @@ def describe(a):
         return f"يرسم بالذكاء المحلي: {a['text']}"
     if op == "ADD":
         return f"يضيف {_readable(a['expr'])} إلى «{a['target']}»"
+    if op == "CALL":
+        return f"يستدعي الدالة: {_readable(a['expr'])}"
+    if op == "RETURN":
+        return f"يرجع من الدالة: {_readable(a['expr'])}"
     if op == "READ":
         return f"يفتح الملف «{a['path']}» ويحط محتواه في «المحتوى»"
     if op == "WRITE":
@@ -1591,6 +1728,10 @@ def codegen(a):
         return f"الناتج = _dad_calc({_evaluate_call(a['expr'], bool(a.get('continued_from')))}); _dad_active = الناتج"
     if op == "SAVE_VAR":
         return f"{a['var']} = {a['expr']}"
+    if op == "CALL":
+        return a["expr"]
+    if op == "RETURN":
+        return f"return {a['expr']}"
     if op == "DEFINE":
         head = f"def {a['name']}({', '.join(a.get('params', []))}):"
         return head + (f" return {a['return_expr']}" if a.get('return_expr') is not None else "")
@@ -1730,6 +1871,9 @@ def _parse_part(part, names):
     if define: return define
     foreach = parse_foreach(part, names)
     if foreach: return foreach
+    call = _parse_user_call_expr(part, names)
+    if call is not None:
+        return {"op": "CALL", "expr": call}
     part = re.sub(r'^((?:اسأل|أسأل|اسال)\s*)\((.*)\)\s+في\s+([^\W\d]\w*)\s*$', r'\1(\2 في \3)', part)
     # Block and inline forms go through the same command parser.
     match = re.match(r'^(إذا|اذا|لو|وإلا إذا|والا اذا|كرر)\s+(.+?)\s*:?$', part)
@@ -1793,6 +1937,10 @@ def expand(src: str, initial_names=None):
             e = DadError('«ثم» اسم محجوز في لغة الضاد — اختر اسمًا آخر.'); e.line = no; raise e
         define = re.match(r'^دالة\s+([^\W\d]\w*)', body)
         if define and scope == 0: names.functions.add(define.group(1))
+        natural_sig = _split_define(body)
+        if natural_sig and scope == 0:
+            _check_user_name(natural_sig[0])
+            names.add_function(natural_sig[0])
         assign = re.match(r'^([^\W\d]\w*)\s*=(?!=)', body)
         if assign:
             try: _check_user_name(assign.group(1))
@@ -1862,6 +2010,7 @@ def expand(src: str, initial_names=None):
                 last = parsed[-1]
                 if last['op'] == 'DEFINE' and last.get('return_expr') is None:
                     child = _copy_names(names)
+                    child.in_function = True
                     for label in last['params'] + declarations.get(no, []): child.add(label)
                     scopes.append((len(ind), child))
                 if last['op'] in ('IF', 'ELIF', 'ELSE') or (last['op'] in ('REPEAT', 'FOREACH') and not last.get('body')) or (last['op'] == 'DEFINE' and last.get('return_expr') is None):
