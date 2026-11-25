@@ -5,7 +5,7 @@ set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
 echo ==========================================
-echo       ALDAD IDE 1.9.17 - BUILD EXE
+echo       NOVAQ IDE 1.9.17 - BUILD EXE
 echo ==========================================
 echo.
 
@@ -40,7 +40,7 @@ echo [2/4] Building DadRunner.exe...
 if errorlevel 1 goto FAIL
 if not exist "%CD%\build_exe\runner_dist\DadRunner.exe" goto FAIL
 
-echo [3/4] Building Aldad_IDE_1.9.17.exe...
+echo [3/4] Building Novaq IDE (Aldad_IDE_1.9.17.exe)...
 %PY% -m PyInstaller --noconfirm --clean --onefile --noconsole ^
   --name Aldad_IDE_1.9.17 ^
   --distpath "%CD%\dist_exe" ^

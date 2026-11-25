@@ -65,7 +65,8 @@ def test_reference_programs(code, answers, expected, monkeypatch):
     with contextlib.redirect_stdout(out):
         exec(compile(dad.to_python(code), '<generated-aldad>', 'exec'), env)
     assert math.isclose(env['الناتج'], expected, abs_tol=1e-6, rel_tol=1e-9)
-    assert float(out.getvalue().splitlines()[-1]) == env['الناتج']
+    # الناتج keeps full precision; the printed form is rounded to at most 6 decimals.
+    assert out.getvalue().splitlines()[-1] == str(vnext._dad_fmt(env['الناتج']))
 
 
 @pytest.mark.parametrize('i', range(100))

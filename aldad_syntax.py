@@ -55,13 +55,22 @@ def strip_comment(text):
 
 
 def split_then(text):
-    positions = [i for i, ch, depth in spans(text)
-                 if depth == 0 and text.startswith("ثم", i)
-                 and (i == 0 or text[i-1].isspace())
-                 and (i+2 == len(text) or text[i+2].isspace() or text[i+2] == "(")]
+    """Split on Arabic ثم or English then, outside quotes and at word boundaries."""
+    positions = []
+    for i, ch, depth in spans(text):
+        if depth != 0:
+            continue
+        if (text.startswith("ثم", i)
+                and (i == 0 or text[i-1].isspace())
+                and (i + 2 == len(text) or text[i + 2].isspace() or text[i + 2] == "(")):
+            positions.append((i, 2))
+        elif (text[i:i+4].lower() == "then"
+                and (i == 0 or not (text[i-1].isalnum() or text[i-1] == "_"))
+                and (i + 4 == len(text) or text[i+4].isspace() or text[i+4] in "(:")):
+            positions.append((i, 4))
     parts, start = [], 0
-    for i in positions:
-        parts.append(text[start:i].strip()); start = i + 2
+    for i, width in positions:
+        parts.append(text[start:i].strip()); start = i + width
     parts.append(text[start:].strip())
     return parts
 
@@ -109,4 +118,4 @@ def check_syntax(text):
         e.line = line; raise e
 
 
-AI_DISABLED = "الذكاء الاصطناعي غير مسموح داخل تنفيذ الضاد. اكتب أوامر ثابتة تعمل بدون إنترنت."
+AI_DISABLED = "الذكاء الاصطناعي غير مسموح داخل تنفيذ نوفاك. اكتب أوامر ثابتة تعمل بدون إنترنت."

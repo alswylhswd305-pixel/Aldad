@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ضاد IDE — بيئة برمجة مستقلة للغة الضاد.
+نوفاك IDE — بيئة برمجة مستقلة للغة نوفاك (Novaq).
 شغّلها:  python aldad_ide.py      (or double-click START_ALDAD.cmd)
 تنفتح في المتصفح على جهازك فقط (127.0.0.1) — ما تطلع على النت.
-الملفات تنحفظ في:  المستندات/الضاد
+الملفات تنحفظ في مجلد عمل نوفاك (أو المسار الذي يحدده DAD_WORK_DIR).
 """
 import base64
 import json
@@ -62,13 +62,13 @@ def safe_name(name: str) -> str:
 
 
 def _dad_command(args, tmp):
-    """أمر تشغيل محرك الضاد من السورس أو من نسخة EXE المجمعة."""
+    """أمر تشغيل محرك نوفاك من السورس أو من نسخة EXE المجمعة."""
     if getattr(sys, "frozen", False) and DAD_RUNNER.exists():
         return [str(DAD_RUNNER), *args, str(tmp)]
     return [sys.executable, str(DAD), *args, str(tmp)]
 
 def dad(args, code=None, answers="", timeout=RUN_TIMEOUT):
-    """يشغّل محرك الضاد على ملف مؤقت داخل مجلد الضاد."""
+    """يشغّل محرك نوفاك على ملف مؤقت داخل مجلد العمل."""
     tmp = WORK / ".run.dad"
     if code is not None:
         tmp.write_text(code, encoding="utf-8")
@@ -292,6 +292,225 @@ def questions(code):
     except ValueError:
         return []
 
+IDE_EXAMPLES = [
+    {
+        "id": "hello_ar",
+        "title": "مرحبا (عربي)",
+        "file": "hello_ar.dad",
+        "code": "قول «مرحبا يا سعود»\nاسأل وش الاسم في الاسم\nقول «أهلا {الاسم}»\n",
+    },
+    {
+        "id": "hello_en",
+        "title": "Hello (English)",
+        "file": "hello_en.dad",
+        "code": 'say "Hello Saud"\nname = ask "What is your name?"\nsay "Hello {name}"\n',
+    },
+    {
+        "id": "eggs",
+        "title": "عدد البيض في السلة",
+        "file": "eggs.dad",
+        "code": (
+            "اسأل كم عدد البيض في السلة\n"
+            "احسب عدد البيض في السلة ضرب 2\n"
+            "قول «إذا ضاعفنا العدد يصير {الناتج}»\n"
+        ),
+    },
+    {
+        "id": "loop",
+        "title": "حساب متكرر",
+        "file": "loop.dad",
+        "code": (
+            "احفظ 0 في المجموع\n"
+            "كرر 3 مرات\n"
+            "    احسب المجموع زائد 5\n"
+            "    احفظ الناتج في المجموع\n"
+            "    قول «الجولة: المجموع = {المجموع}»\n"
+            "قول «النتيجة النهائية {المجموع}»\n"
+        ),
+    },
+    {
+        "id": "shapes_ar",
+        "title": "رسم دائرة ومربع",
+        "file": "shapes_ar.dad",
+        "code": "ارسم دائرة حمراء ومربع أزرق\nقول «هذه دائرة حمراء ومربع أزرق»\n",
+    },
+    {
+        "id": "shapes_en",
+        "title": "Draw a circle (EN)",
+        "file": "shapes_en.dad",
+        "code": 'draw a green circle\nsay "a green circle"\n',
+    },
+    {
+        "id": "if_ar",
+        "title": "شرط بسيط",
+        "file": "if_ar.dad",
+        "code": (
+            "اسأل كم العمر في العمر\n"
+            "إذا العمر أكبر من 18\n"
+            "    قول «إنت بالغ»\n"
+            "وإلا\n"
+            "    قول «إنت صغير»\n"
+        ),
+    },
+]
+
+IDE_GUIDE = [
+    {
+        "id": "g_say",
+        "title": "1. قول",
+        "explain": "قول تعرض كلاماً على الشاشة.",
+        "file": "guide_say.dad",
+        "code": "قول «هلا يا سعود»\n",
+        "answers": "",
+    },
+    {
+        "id": "g_ask",
+        "title": "2. اسأل",
+        "explain": "اسأل توقف البرنامج وتطلب جواباً منك.",
+        "file": "guide_ask.dad",
+        "code": "اسأل شنو اسمك\nقول الاسم\n",
+        "answers": "سعود\n",
+    },
+    {
+        "id": "g_save_greet",
+        "title": "3. اسأل واحفظ وحيّ بالاسم",
+        "explain": "واحفظه في الاسم يحفظ الجواب، وبعدها تحيي بالاسم.",
+        "file": "guide_greet.dad",
+        "code": (
+            "اسأل شنو اسمك واحفظه في الاسم\n"
+            "قول اهلا (الاسم)\n"
+            "قول «أهلا {اسمك}»\n"
+        ),
+        "answers": "نورة\n",
+    },
+    {
+        "id": "g_calc",
+        "title": "4. احسب",
+        "explain": "احسب تحفظ النتيجة في الناتج. قول الناتج تعرضها.",
+        "file": "guide_calc.dad",
+        "code": "احسب 5 زائد 3 ضرب 2\nقول الناتج\n",
+        "answers": "",
+    },
+    {
+        "id": "g_then",
+        "title": "5. و / ثم",
+        "explain": "و أو ثم أو بعدين تربط أمرين واضحين.",
+        "file": "guide_then.dad",
+        "code": "احسب 5 زائد 3 و قول الناتج\n",
+        "answers": "",
+    },
+    {
+        "id": "g_if",
+        "title": "6. إذا",
+        "explain": "إذا تختبر شرطاً. الأسطر تحتها تكون مزاحة.",
+        "file": "guide_if.dad",
+        "code": (
+            "اسأل كم العمر\n"
+            "إذا العمر أكبر من 18\n"
+            "    قول «إنت بالغ»\n"
+            "وإلا\n"
+            "    قول «إنت صغير»\n"
+        ),
+        "answers": "21\n",
+    },
+    {
+        "id": "g_rep",
+        "title": "7. كرر",
+        "explain": "كرر تعيد الأسطر المزاحة عدداً من المرات.",
+        "file": "guide_rep.dad",
+        "code": "كرر 3 مرات\n    قول «هلا»\n",
+        "answers": "",
+    },
+    {
+        "id": "g_draw",
+        "title": "8. ارسم",
+        "explain": "ارسم شكلاً بسيطاً، وتظهر الرسمة في النتائج.",
+        "file": "guide_draw.dad",
+        "code": "ارسم دائرة حمراء ومربع أزرق\n",
+        "answers": "",
+    },
+]
+
+IDE_GUIDE_EN = [
+    {
+        "id": "g_say",
+        "title": "1. say",
+        "explain": "say shows text on the screen.",
+        "file": "guide_say_en.dad",
+        "code": "say \"hello Saud\"\n",
+        "answers": "",
+    },
+    {
+        "id": "g_ask",
+        "title": "2. ask",
+        "explain": "ask pauses the program and waits for your answer.",
+        "file": "guide_ask_en.dad",
+        "code": "ask what is your name\nsay name\n",
+        "answers": "Saud\n",
+    },
+    {
+        "id": "g_save_greet",
+        "title": "3. ask, save, and greet by name",
+        "explain": "and save it in name stores the answer, then you greet by name.",
+        "file": "guide_greet_en.dad",
+        "code": (
+            "ask what is your name and save it in name\n"
+            "say hello (name)\n"
+            "say \"hello {name}\"\n"
+        ),
+        "answers": "Nora\n",
+    },
+    {
+        "id": "g_calc",
+        "title": "4. calc",
+        "explain": "calc stores the value in result. say result shows it.",
+        "file": "guide_calc_en.dad",
+        "code": "calc 5 plus 3 times 2\nsay result\n",
+        "answers": "",
+    },
+    {
+        "id": "g_then",
+        "title": "5. and / then",
+        "explain": "and or then links two clear commands.",
+        "file": "guide_then_en.dad",
+        "code": "calc 5 plus 3 and say result\n",
+        "answers": "",
+    },
+    {
+        "id": "g_if",
+        "title": "6. if",
+        "explain": "if tests a condition. The lines under it are indented.",
+        "file": "guide_if_en.dad",
+        "code": (
+            "ask how many years\n"
+            "if years gt 18\n"
+            "    say \"you are an adult\"\n"
+            "else\n"
+            "    say \"you are young\"\n"
+        ),
+        "answers": "21\n",
+    },
+    {
+        "id": "g_rep",
+        "title": "7. rep",
+        "explain": "rep repeats the indented lines a given number of times.",
+        "file": "guide_rep_en.dad",
+        "code": "rep 3 times\n    say \"hi\"\n",
+        "answers": "",
+    },
+    {
+        "id": "g_draw",
+        "title": "8. draw",
+        "explain": "draw a simple shape, and the picture appears in the results.",
+        "file": "guide_draw_en.dad",
+        "code": "draw a red circle and a blue square\n",
+        "answers": "",
+    },
+]
+
+
+
+
 def _exe_name(name):
     name = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(str(name or "program")).stem).strip("_") or "AldadApp"
     return name[:60]
@@ -307,22 +526,28 @@ def _launcher_source(code):
     )
 
 def build_exe_program(code, name):
-    """يبني EXE على ويندوز باستخدام PyInstaller. يبقى محرك الضاد نفسه داخل EXE."""
+    """يبني EXE على ويندوز باستخدام PyInstaller. يبقى محرك نوفاك نفسه داخل EXE."""
     if os.name != "nt":
         return {"ok": False, "error": "بناء EXE متاح على Windows فقط."}
     if getattr(sys, "frozen", False):
-        return {"ok": False, "error": "لبناء برنامج EXE جديد استخدم نسخة السورس وشغّل BUILD_ALDAD_IDE_EXE.cmd. نسخة EXE الجاهزة تشغّل الضاد لكنها ما تحمل PyInstaller داخلها."}
+        return {"ok": False, "error": "لبناء برنامج EXE جديد استخدم نسخة السورس وشغّل BUILD_ALDAD_IDE_EXE.cmd. نسخة EXE الجاهزة تشغّل نوفاك لكنها ما تحمل PyInstaller داخلها."}
     # برامج IDE اللي تستخدم جسر الملفات تحتاج المضيف، فلا نبني ملف مكسور بصمت.
     if re.search(r"اعرض\s+(?:ملفات|الملفات)|افتح\s+(?:المختار|الملف المختار)|شغ[للّ]\s+الكود|ابن\s+.*EXE", code):
-        return {"ok": False, "error": "هذا برنامج IDE يعتمد على جسر ضاد IDE. استخدم BUILD_ALDAD_IDE_EXE.cmd لبناء نسخة IDE كاملة."}
+        return {"ok": False, "error": "هذا برنامج IDE يعتمد على جسر نوفاك IDE. استخدم BUILD_ALDAD_IDE_EXE.cmd لبناء نسخة IDE كاملة."}
     try:
         chk = subprocess.run([sys.executable, "-m", "PyInstaller", "--version"], capture_output=True, timeout=30)
         if chk.returncode != 0:
-            ins = subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], capture_output=True, timeout=300)
-            if ins.returncode != 0:
-                return {"ok": False, "error": "ما قدرت أثبت PyInstaller. شغّل: python -m pip install pyinstaller"}
+            return {"ok": False, "error": (
+                "بناء ملف EXE يحتاج مكتبة PyInstaller، وهي غير مثبتة على هذا الجهاز. "
+                "ما ثبّتّها تلقائياً. إذا توافق على التثبيت، شغّل في الطرفية:\n"
+                "python -m pip install pyinstaller"
+            )}
     except Exception as e:
-        return {"ok": False, "error": "تعذر تجهيز PyInstaller: " + str(e)}
+        return {"ok": False, "error": (
+            "ما لقيت PyInstaller على هذا الجهاز. ما ثبّتّها تلقائياً. "
+            "إذا توافق على التثبيت: python -m pip install pyinstaller\n"
+            f"({type(e).__name__})"
+        )}
     build_dir = WORK / ".exe_build"
     dist = WORK / "EXE"
     build_dir.mkdir(parents=True, exist_ok=True); dist.mkdir(parents=True, exist_ok=True)
@@ -418,8 +643,31 @@ class Handler(BaseHTTPRequestHandler):
             if TERM.waiting: TERM.send({'cancel':True})
             return self._send(200, TERM.send({"reset": True}))
         if path == "/rules":
-            p = HERE / "rules_ar.md"
-            return self._send(200, {"md": p.read_text(encoding="utf-8") if p.exists() else "القاموس مو موجود"})
+            lang = str(data.get("lang") or parse_qs(urlparse(self.path).query).get("lang", ["ar"])[0] or "ar").lower()
+            rp = HERE / ("rules_en.md" if lang.startswith("en") else "rules_ar.md")
+            missing = "Dictionary not found" if lang.startswith("en") else "القاموس مو موجود"
+            return self._send(200, {"md": rp.read_text(encoding="utf-8") if rp.exists() else missing, "lang": "en" if lang.startswith("en") else "ar"})
+        if path == "/examples":
+            return self._send(200, {"examples": [
+                {"id": e["id"], "title": e["title"], "file": e["file"], "code": e["code"]}
+                for e in IDE_EXAMPLES
+            ]})
+        if path == "/guide":
+            def pack(rows):
+                return [
+                    {"id": e["id"], "title": e["title"], "explain": e["explain"], "file": e["file"], "code": e["code"]}
+                    for e in rows
+                ]
+            return self._send(200, {
+                "lessons": pack(IDE_GUIDE),
+                "lessons_en": pack(IDE_GUIDE_EN),
+                "title": "دليل المبتدئ",
+                "title_en": "Beginner guide",
+                "lead": "ثماني خطوات قصيرة. اضغط «شغّل المثال» لأي درس، ينزل في المحرر ويشتغل.",
+                "lead_en": "Eight short steps. Click Run example on a lesson to load it and run it.",
+                "run": "▶ شغّل المثال",
+                "run_en": "▶ Run example",
+            })
         if path == "/example":
             p = HERE / "example.dad"
             return self._send(200, {"code": p.read_text(encoding="utf-8") if p.exists() else 'قل(هلا والله)\n'})
@@ -439,7 +687,7 @@ def free_port(start=8787):
     return 0
 
 
-PAGE = r'''<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>ضاد IDE __VER__</title>
+PAGE = r'''<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>نوفاك IDE __VER__</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root{--bg:#1b1d27;--panel:#232634;--line:#343849;--fg:#e9e9ef;--mut:#9aa0b4;--acc:#3a7bd5;--acc2:#2f9e6e;--bad:#e5534b;
@@ -450,6 +698,9 @@ body{display:flex;flex-direction:column}
 header{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--line)}
 header h1{font-size:17px;margin:0 0 0 10px;font-weight:700;letter-spacing:.3px}
 header h1 span{color:var(--acc)}
+.menu{position:relative;display:inline-block}
+.menu-list{position:absolute;top:110%;right:0;min-width:240px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px;z-index:8;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.menu-list button{display:block;width:100%;text-align:right;margin:3px 0}
 button{font:inherit;font-size:14px;padding:7px 12px;white-space:nowrap;border-radius:7px;border:1px solid var(--line);background:#2b2f40;color:var(--fg);cursor:pointer}
 button:hover{border-color:var(--acc)}
 button.run{background:var(--acc);border-color:var(--acc);font-weight:600}
@@ -498,31 +749,51 @@ main{flex:1;display:flex;flex-direction:column;min-height:0}
 .rules th{background:#2b2f40}.rules code{background:#2b2f40;padding:1px 6px;border-radius:5px;font-family:inherit}
 .rules pre{background:#191b24;border:1px solid var(--line);border-radius:8px;padding:10px;white-space:pre-wrap;unicode-bidi:plaintext;font-family:"Segoe UI","Dubai",Tahoma,sans-serif;font-size:15px}
 .hint{font-size:12px;color:var(--mut)}
+ .box.guide{width:min(680px,94vw);max-height:92vh;overflow:auto}
+.guide h2{margin:0 0 4px;font-size:18px}
+.guide .lead{color:var(--mut);margin:0 0 8px;font-size:14px}
+.g-item{border:1px solid var(--line);border-radius:10px;padding:7px 10px 8px;margin:5px 0;background:#1b1d27}
+.g-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:2px}
+.g-item h3{margin:0;font-size:15px;color:var(--acc)}
+.g-item p{margin:0 0 6px;font-size:14px;line-height:1.65}
+.g-item pre{margin:0;background:#191b24;border:1px solid var(--line);border-radius:8px;padding:6px 8px;white-space:pre-wrap;unicode-bidi:plaintext;font-family:"Segoe UI","Dubai",Tahoma,sans-serif;font-size:14px}
+.g-item button.run{font-weight:600;padding:5px 10px}
+.g-lang{display:flex;gap:8px;margin:0 0 8px}
+.g-lang button{padding:4px 12px;font-weight:600}
+.g-lang button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.guide-top{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.guide-top h2{margin:0}
 </style></head><body>
 <header id="hdr">
-  <h1>ضاد <span>IDE</span> <small style="font-size:12px;color:var(--mut)">نسخة __VER__</small></h1>
+  <h1>نوفاك <span>IDE</span> <small style="font-size:12px;color:var(--mut)">Novaq · __VER__</small></h1>
   <button class="run" id="bRun" title="Ctrl+Enter">▶ شغّل</button>
   <button id="bOpen">📂 فتح</button>
   <button id="bSave" title="Ctrl+S">💾 حفظ</button>
   <button id="bNew">＋ جديد</button>
-  <button id="bEx">مثال</button>
+  <div class="menu" id="exMenuWrap">
+    <button id="bEx">أمثلة ▾</button>
+    <div class="menu-list" id="exList" hidden></div>
+  </div>
+  <button id="bExe" title="يبني البرنامج الحالي كملف EXE">📦 EXE</button>
   <button id="bIdePro">IDE Pro</button>
   <button id="bRules">📖 القاموس</button>
+  <button id="bGuide">📘 دليل المبتدئ</button>
   <button id="bTerm">⌨ الطرفية</button>
   <span class="state" id="state"></span>
   <input id="fname" value="program.dad" title="اسم الملف">
 </header>
 <section id="term" hidden>
-  <div class="thead"><b>⌨ طرفية الضاد</b><span class="meta">اكتب سطر واضغط Enter — ينفذ على طول والذاكرة تظل · ↑↓ الأسطر السابقة</span>
+  <div class="thead"><b>⌨ طرفية نوفاك</b><span class="meta">اكتب سطر واضغط Enter — ينفذ على طول والذاكرة تظل · ↑↓ الأسطر السابقة</span>
     <button id="tClear">مسح الشاشة</button><button id="tReset">مسح الذاكرة</button><button id="tBack">↩ المحرر</button></div>
   <div id="tlog"></div>
-  <div class="tin"><span id="tprompt">ضاد›</span><input id="tinput" autocomplete="off" spellcheck="false" dir="rtl"></div>
+  <div class="tin"><span id="tprompt">نوفاك›</span><input id="tinput" autocomplete="off" spellcheck="false" dir="rtl"></div>
 </section>
 <main>
   <div class="edwrap"><div class="edbox"><div class="hl" id="hl"></div><textarea id="ed" spellcheck="false" autocomplete="off"></textarea></div><div class="gutter" id="g">1</div></div>
   <div class="out"><div class="outhead"><b>النتائج</b><span id="status" class="meta"></span><span class="hint" style="margin-inline-start:auto">الملفات في: <span id="wdir"></span></span></div><div id="res"><span class="meta">اكتب برنامجك فوق واضغط ▶ شغّل.</span></div></div>
 </main>
 <div class="modal" id="rmodal"><div class="box rules"><div id="rbody"></div><button id="rClose">إغلاق</button></div></div>
+<div class="modal" id="gmodal"><div class="box rules guide"><div class="guide-top"><h2 id="gTitle">دليل المبتدئ</h2><div class="g-lang"><button id="gAr" class="on" type="button">العربية</button><button id="gEn" type="button">English</button></div></div><p class="lead" id="gLead">ثماني خطوات قصيرة. اضغط «شغّل المثال» لأي درس، ينزل في المحرر ويشتغل.</p><div id="gbody"></div><button id="gClose">إغلاق</button></div></div>
 <div class="modal" id="modal"><div class="box"><h3>افتح ملف</h3><div id="flist"></div>
   <p class="hint">أو من مكان ثاني: <input type="file" id="upl" accept=".ضاد,.dad,.txt"></p><button id="mClose">إغلاق</button></div></div>
 <script>
@@ -533,7 +804,7 @@ document.getElementById('wdir').textContent=WORKDIR;
 let ERRLINE=0, dirty=false;
 const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 async function api(path, body){ const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Dad-Token':TOKEN},body:JSON.stringify(body||{})}); return r.json(); }
-// جسر آمن لبرامج الضاد المولدة داخل iframe: ما نعطيها التوكن، فقط أوامر محددة.
+// جسر آمن لبرامج نوفاك المولدة داخل iframe: ما نعطيها التوكن، فقط أوامر محددة.
 window.addEventListener('message', async e=>{
   const d=e.data||{}; if(d.dadBridge!==1) return;
   const map={list:'/list',open:'/open',save:'/save',run:'/run',run_start:'/run_start',run_answer:'/run_answer',run_stop:'/run_stop',build_exe:'/build_exe'};
@@ -640,7 +911,34 @@ document.getElementById('mClose').onclick=()=>document.getElementById('modal').s
 function newFile(){ if(dirty && !confirm('فيه تغييرات ما انحفظت. تمسحها؟')) return; ed.value=''; fname.value='program.dad'; ERRLINE=0; paint(); setDirty(false);
   res.innerHTML='<span class="meta">ملف جديد.</span>'; statusEl.textContent=''; ed.focus(); }
 async function example(){ const r=await api('/example'); ed.value=r.code; fname.value='example.dad'; ERRLINE=0; paint(); setDirty(true); }
-async function idePro(){ const r=await api('/ide_pro_example'); ed.value=r.code||''; fname.value='aldad_ide_pro.dad'; ERRLINE=0; paint(); setDirty(true); res.innerHTML='<span class="meta">مثال IDE Pro مكتوب بالضاد.</span>'; }
+async function loadExample(ex, andRun){
+  ed.value=ex.code||''; fname.value=ex.file||'example.dad'; ERRLINE=0; paint(); setDirty(true);
+  document.getElementById('exList').hidden=true;
+  if(andRun!==false) run();
+}
+async function fillExamples(){
+  const box=document.getElementById('exList');
+  try{
+    const r=await api('/examples');
+    box.innerHTML='';
+    (r.examples||[]).forEach(ex=>{
+      const b=document.createElement('button');
+      b.textContent=ex.title;
+      b.onclick=()=>loadExample(ex,true);
+      box.appendChild(b);
+    });
+  }catch(e){ box.innerHTML='<div class="hint">ما قدرت أحمل الأمثلة.</div>'; }
+}
+async function buildExe(){
+  statusEl.innerHTML='<span class="meta">يجري بناء ملف EXE…</span>';
+  const r=await api('/build_exe',{code:ed.value,name:fname.value});
+  if(r && r.ok){
+    show({ok:true,out:'انبنى الملف هنا:\\n'+(r.path||''),err:''},0);
+  }else{
+    show({ok:false,out:'',err:'⚠ '+((r&&r.error)||'فشل بناء EXE')},0);
+  }
+}
+async function idePro(){ const r=await api('/ide_pro_example'); ed.value=r.code||''; fname.value='aldad_ide_pro.dad'; ERRLINE=0; paint(); setDirty(true); res.innerHTML='<span class="meta">مثال IDE Pro مكتوب بنوفاك.</span>'; }
 document.getElementById('bRun').onclick=()=>run(); document.getElementById('bSave').onclick=save; document.getElementById('bOpen').onclick=openDlg;
 document.getElementById('bNew').onclick=newFile;
 function md(t){ const L=t.split('\n'); let o='',inCode=false,inTab=false,inList=false; const inl=s=>esc(s).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
@@ -654,8 +952,8 @@ function md(t){ const L=t.split('\n'); let o='',inCode=false,inTab=false,inList=
 const term=document.getElementById('term'), mainEl=document.querySelector('main'), tlog=document.getElementById('tlog'), tin=document.getElementById('tinput'), tprompt=document.getElementById('tprompt');
 let tHist=[], tIdx=0, tBlock=[], tAsk=null;
 function tline(text,cls){ const d=document.createElement('div'); d.className='ln '+(cls||''); d.textContent=text; tlog.appendChild(d); tlog.scrollTop=tlog.scrollHeight; return d; }
-function tcmd(text){ const d=document.createElement('div'); d.className='ln cmd'; d.innerHTML='<b></b>'; d.querySelector('b').textContent=tBlock.length?'…':'ضاد›'; d.appendChild(document.createTextNode(text)); tlog.appendChild(d); tlog.scrollTop=tlog.scrollHeight; }
-function openTerm(){ mainEl.hidden=true; mainEl.style.display='none'; term.hidden=false; if(!tlog.children.length){ tline('طرفية الضاد — مثل الشاشة السودا حقت Python: كل سطر ينفذ على طول.','fx'); tline('جرّب: قل هلا   ·   5 زائد 3   ·   اسأل كم عمرك   ·   احسب العمر ضرب 2','fx'); tline('سطر ينتهي بـ «:» أو يبدأ بـ إذا/كرر/لكل ← يكمل بسطر ثاني، وسطر فاضي ينفذه.','fx'); } tin.focus(); }
+function tcmd(text){ const d=document.createElement('div'); d.className='ln cmd'; d.innerHTML='<b></b>'; d.querySelector('b').textContent=tBlock.length?'…':'نوفاك›'; d.appendChild(document.createTextNode(text)); tlog.appendChild(d); tlog.scrollTop=tlog.scrollHeight; }
+function openTerm(){ mainEl.hidden=true; mainEl.style.display='none'; term.hidden=false; if(!tlog.children.length){ tline('طرفية نوفاك — اكتب سطراً واضغط Enter، ينفذ على طول والذاكرة تظل.','fx'); tline('جرّب: قل هلا   ·   5 زائد 3   ·   اسأل كم عمرك   ·   احسب العمر ضرب 2','fx'); tline('سطر ينتهي بـ «:» أو يبدأ بـ إذا/كرر/لكل ← يكمل بسطر ثاني، وسطر فاضي ينفذه.','fx'); } tin.focus(); }
 function closeTerm(){ term.hidden=true; mainEl.hidden=false; mainEl.style.display=''; ed.focus(); }
 function needsMore(l){ const t=l.trim();
   if(/:$/.test(t)) return true;
@@ -675,7 +973,7 @@ async function tRun(code){
   (r.images||[]).forEach(im=>tlog.appendChild(mediaEl(im)));
   tlog.scrollTop=tlog.scrollHeight;
 }
-function tQuestion(q){ return new Promise(res=>{ tprompt.textContent=q; tprompt.className='q'; tAsk=v=>{ tprompt.textContent='ضاد›'; tprompt.className=''; tAsk=null; res(v); }; tin.focus(); }); }
+function tQuestion(q){ return new Promise(res=>{ tprompt.textContent=q; tprompt.className='q'; tAsk=v=>{ tprompt.textContent='نوفاك›'; tprompt.className=''; tAsk=null; res(v); }; tin.focus(); }); }
 tin.addEventListener('keydown',async e=>{
   if(e.key==='ArrowUp'){ if(tIdx>0){ tIdx--; tin.value=tHist[tIdx]||''; } e.preventDefault(); return; }
   if(e.key==='ArrowDown'){ if(tIdx<tHist.length){ tIdx++; tin.value=tHist[tIdx]||''; } e.preventDefault(); return; }
@@ -684,7 +982,7 @@ tin.addEventListener('keydown',async e=>{
   e.preventDefault(); const v=tin.value; tin.value='';
   if(tAsk){ tAsk(v); return; }
   if(tBlock.length){
-    if(v.trim()===''){ const code=tBlock.join('\n'); tBlock=[]; tprompt.textContent='ضاد›'; await tRun(code); return; }
+    if(v.trim()===''){ const code=tBlock.join('\n'); tBlock=[]; tprompt.textContent='نوفاك›'; await tRun(code); return; }
     tcmd(v); tBlock.push(v.startsWith(' ')?v:'    '+v); return;
   }
   if(!v.trim()) return;
@@ -696,9 +994,52 @@ document.getElementById('bTerm').onclick=openTerm; document.getElementById('tBac
 document.getElementById('tClear').onclick=()=>{ tlog.innerHTML=''; tin.focus(); };
 document.getElementById('tReset').onclick=async()=>{ const r=await api('/repl_reset'); tline(r.out||'✓','fx'); tin.focus(); };
 document.getElementById('bRules').onclick=async()=>{ const r=await api('/rules'); document.getElementById('rbody').innerHTML=md(r.md); document.getElementById('rmodal').style.display='flex'; };
-document.getElementById('rClose').onclick=()=>document.getElementById('rmodal').style.display='none'; document.getElementById('bEx').onclick=example; document.getElementById('bIdePro').onclick=idePro;
+document.getElementById('rClose').onclick=()=>document.getElementById('rmodal').style.display='none';
+let guideData=null, guideLang='ar';
+function renderGuide(){
+  if(!guideData) return;
+  const en=guideLang==='en';
+  const list=en?(guideData.lessons_en||guideData.lessons):guideData.lessons;
+  const runLbl=en?(guideData.run_en||'▶ Run example'):(guideData.run||'▶ شغّل المثال');
+  document.getElementById('gTitle').textContent=en?(guideData.title_en||'Beginner guide'):(guideData.title||'دليل المبتدئ');
+  document.getElementById('gLead').textContent=en?(guideData.lead_en||''):(guideData.lead||'');
+  document.getElementById('gAr').classList.toggle('on', !en);
+  document.getElementById('gEn').classList.toggle('on', en);
+  document.getElementById('gClose').textContent=en?'Close':'إغلاق';
+  const box=document.getElementById('gbody'); box.innerHTML='';
+  box.setAttribute('dir', en?'ltr':'rtl');
+  document.getElementById('gLead').setAttribute('dir', en?'ltr':'rtl');
+  document.getElementById('gTitle').setAttribute('dir', en?'ltr':'rtl');
+  (list||[]).forEach(les=>{
+    const d=document.createElement('div'); d.className='g-item';
+    const head=document.createElement('div'); head.className='g-head';
+    const h=document.createElement('h3'); h.textContent=les.title||'';
+    const b=document.createElement('button'); b.className='run'; b.textContent=runLbl;
+    b.onclick=()=>{ document.getElementById('gmodal').style.display='none'; loadExample(les, true); };
+    head.append(h,b);
+    const p=document.createElement('p'); p.textContent=les.explain||'';
+    const pre=document.createElement('pre'); pre.textContent=les.code||''; if(en) pre.style.direction='ltr';
+    d.append(head,p,pre); box.appendChild(d);
+  });
+}
+async function openGuide(lang){
+  if(lang) guideLang=lang;
+  const r=await api('/guide');
+  guideData=r||{};
+  renderGuide();
+  document.getElementById('gmodal').style.display='flex';
+}
+document.getElementById('bGuide').onclick=()=>openGuide();
+document.getElementById('gAr').onclick=()=>openGuide('ar');
+document.getElementById('gEn').onclick=()=>openGuide('en');
+document.getElementById('gClose').onclick=()=>document.getElementById('gmodal').style.display='none';
+
+document.getElementById('bEx').onclick=async ev=>{ ev.stopPropagation(); const box=document.getElementById('exList'); const open=box.hidden; if(open) await fillExamples(); box.hidden=!open; };
+document.addEventListener('click',e=>{ const w=document.getElementById('exMenuWrap'); if(w && !w.contains(e.target)) document.getElementById('exList').hidden=true; });
+document.getElementById('bExe').onclick=buildExe;
+document.getElementById('bIdePro').onclick=idePro;
 // آخر مسودة
-try{ const d=JSON.parse(localStorage.getItem('dad_draft')||'null'); if(d&&d.c){ ed.value=d.c; fname.value=d.n||fname.value; setDirty(true);} else { ed.value='قل(ضاد IDE جاهز)\n'; setDirty(false);} }catch(e){ ed.value='قل(ضاد IDE جاهز)\n'; }
+try{ const d=JSON.parse(localStorage.getItem('dad_draft')||'null'); if(d&&d.c){ ed.value=d.c; fname.value=d.n||fname.value; setDirty(true);} else { ed.value='قول «نوفاك IDE جاهز»\nارسم دائرة حمراء ومربع أزرق\n'; setDirty(false);} }catch(e){ ed.value='قول «نوفاك IDE جاهز»\nارسم دائرة حمراء ومربع أزرق\n'; }
 paint(); ed.focus();
 </script></body></html>'''
 
@@ -720,15 +1061,15 @@ def main():
         frozen = getattr(sys, "frozen", False)
         engine_ok = DAD_RUNNER.exists() if frozen else (DAD.exists() and (HERE / "vnext.py").exists())
         if not engine_ok:
-            print("⚠ ملفات محرك الضاد ناقصة.")
+            print("⚠ ملفات محرك نوفاك ناقصة.")
             return 2
         port = free_port()
         if not port:
-            print("⚠ ما لقيت منفذ محلي فاضي بين 8787 و8836. سكّر أي نسخة ضاد مفتوحة وجرب مرة ثانية.")
+            print("⚠ ما لقيت منفذ محلي فاضي بين 8787 و8836. سكّر أي نسخة نوفاك مفتوحة وجرب مرة ثانية.")
             return 3
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         url = f"http://127.0.0.1:{port}/"
-        print(f"ضاد IDE — نسخة {DAD_VERSION} — شغال على {url}\nالملفات في: {WORK}\nإذا المتصفح ما فتح، انسخ الرابط اللي فوق.\nسكّر هالنافذة عشان توقفه.")
+        print(f"نوفاك IDE — نسخة {DAD_VERSION} — شغال على {url}\nالملفات في: {WORK}\nإذا المتصفح ما فتح، انسخ الرابط اللي فوق.\nسكّر هالنافذة عشان توقفه.")
         if "--no-browser" not in sys.argv:
             threading.Timer(0.7, lambda: _open_browser(url)).start()
         try:
@@ -741,7 +1082,7 @@ def main():
             (HERE / "aldad_error.txt").write_text(f"{type(e).__name__}: {e}\n", encoding="utf-8")
         except Exception:
             pass
-        print(f"⚠ ما اشتغل ضاد IDE: {type(e).__name__}: {e}")
+        print(f"⚠ ما اشتغل نوفاك IDE: {type(e).__name__}: {e}")
         print("تم حفظ السبب في ملف aldad_error.txt إذا أمكن.")
         return 10
 

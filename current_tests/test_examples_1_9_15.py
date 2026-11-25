@@ -39,7 +39,7 @@ def test_existing_ui_examples_still_compile(name):
 
 
 @pytest.mark.parametrize('name,answers,expected',[
-    ('example.dad','سعود\n22\n','الضاد لغتي'),
+    ('example.dad','سعود\n22\n','نوفاك لغتي'),
     ('functions_example.dad','','10'),
     ('money_manager.dad','سعود\n1200\n','الباقي معك: 725 دينار'),
     # Independent geometry and prices: 37 tiles * 1.5 + 9 litres * 2.25.
