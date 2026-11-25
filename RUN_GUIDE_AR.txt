@@ -1,6 +1,6 @@
-تشغيل Aldad 1.9.17
+تشغيل نوفاك (Novaq) 1.9.17
 
-فك الضغط أولًا. على Windows افتح START_ALDAD.cmd؛ إذا تعذر البدء افتح REPAIR_ALDAD.cmd.
+فك الضغط أولًا. على Windows افتح START_ALDAD.cmd (يبدأ نوفاك IDE)؛ إذا تعذر البدء افتح REPAIR_ALDAD.cmd.
 على Linux/macOS شغّل: python3 aldad_ide.py
 البرنامج يفتح محررًا عربيًا في المتصفح ويحفظ البرامج في مجلد عمله.
 
@@ -18,7 +18,7 @@ python3 dad.py run examples/interactive_invoice.dad
 ينشئ ملف HTML محليًا. افتحه في المتصفح، أدخل السعر والكمية واضغط الزر.
 
 VS Code:
-Extensions > Install from VSIX > Aldad_VSCode_1.9.17.vsix
+Extensions > Install from VSIX > Aldad_VSCode_1.9.17.vsix  (اسم ملف الإضافة الحالي)
 Ctrl+Alt+R أو زر شغّل. الأسئلة تظهر وقت تنفيذها، بما فيها الأسئلة داخل الحلقة.
 
 بناء EXE اختياري على Windows: BUILD_ALDAD_IDE_EXE.cmd

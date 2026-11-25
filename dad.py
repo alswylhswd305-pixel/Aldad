@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-لغة الضاد — تكتب Python بالعربي.
+لغة نوفاك — تكتب البرامج بالعربي.
 الملف .ضاد يتحول لـ Python قبل التشغيل، فتاخذ كل مكتبات Python وكل قدرة الذكاء الاصطناعي.
 
 الأوامر:
@@ -23,6 +23,7 @@ KEYWORDS = {
     "لكل": "for", "في": "in", "طالما": "while", "إذا": "if", "وإلا_إذا": "elif", "وإلا": "else",
     "دالة": "def", "أرجع": "return", "صنف": "class", "استورد": "import", "من": "from", "باسم": "as",
     "حاول": "try", "عند_خطأ": "except", "أخيرا": "finally", "ارفع": "raise", "مع": "with",
+    "catch": "except", "عند_نجاح": "else",
     "تجاوز": "pass", "اكسر": "break", "و": "and", "أو": "or", "ليس": "not",
     "هو": "is", "صح": "True", "خطأ": "False", "لاشيء": "None", "دالة_سريعة": "lambda",
     "أعط": "yield", "عام": "global", "غير_محلي": "nonlocal", "تأكد": "assert", "احذف": "del",
@@ -79,10 +80,16 @@ for _ar, _py in METHODS.items():
 
 ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 ARABIC_PUNCT = {"،": ",", "؛": ";"}
+_IDENT_MARKS = r"\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED"
+_IDENT_WORD = rf"[^\W\d_][\w{_IDENT_MARKS}]*"
+_IDENT_PY = rf"(?:[^\W\d_]|_)[\w{_IDENT_MARKS}]*"
+_BIDI_CHARS = frozenset('\u061c\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2060\u2061\u2062\u2063\u2064\u2066\u2067\u2068\u2069\ufeff')
 
 
 
-BLOCK_STARTS = ("إذا", "وإلا_إذا", "طالما", "لكل", "وإلا", "حاول", "عند_خطأ", "أخيرا", "مع", "دالة", "صنف")
+BLOCK_STARTS = ("إذا", "وإلا_إذا", "طالما", "لكل", "وإلا", "حاول", "عند_خطأ", "أخيرا", "مع", "دالة", "صنف",
+                "if", "elif", "else", "while", "for", "def", "class",
+                "try", "catch", "except", "finally", "عند_نجاح")
 
 
 def _split_top(line: str, word: str):
@@ -98,11 +105,20 @@ def _split_top(line: str, word: str):
             i += 1; continue
         if ch in "\"'": quote = ch; cur.append(ch); i += 1; continue
         if ch == "#": cur.append(line[i:]); break
-        if line.startswith(word, i):
+        words = (word, "then") if word == "ثم" else ((word,) if isinstance(word, str) else tuple(word))
+        hit = None
+        for w in sorted(words, key=len, reverse=True):
+            chunk = line[i:i + len(w)]
+            same = chunk.lower() == w.lower() if w.isascii() else line.startswith(w, i)
+            if not same:
+                continue
             before = line[i - 1] if i else " "
-            after = line[i + len(word)] if i + len(word) < n else " "
+            after = line[i + len(w)] if i + len(w) < n else " "
             if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
-                parts.append("".join(cur)); cur = []; i += len(word); continue
+                hit = w
+                break
+        if hit:
+            parts.append("".join(cur)); cur = []; i += len(hit); continue
         cur.append(ch); i += 1
     parts.append("".join(cur))
     return parts
@@ -114,45 +130,45 @@ def _phrase(seg: str) -> str:
 
     # «اسأل» اختصار طبيعي وثابت لـ input بدون ذكاء اصطناعي.
     # ما ندخل Regex الخاص فيه إلا إذا الكلمة موجودة؛ يحافظ على سرعة بقية الأسطر.
-    if "اسأل" in s:
+    if "اسأل" in s or "اسال" in s or re.search(r"(?i)\bask\b", s):
         #   اسأل «كم عمرك؟» في العمر   -> العمر = أدخل("كم عمرك؟")
         #   الاسم = اسأل «اسمك؟»       -> الاسم = أدخل("اسمك؟")
-        #   اسأل «اضغط Enter»          -> أدخل("اضغط Enter")
-        m = re.match(r"^([\w\u0600-\u06FF_]+)\s*=\s*اسأل\s+(.+)$", s)
+        #   name = ask "Your name?"    -> name = _dad_ask("Your name?")
+        m = re.match(r"^([\w\u0600-\u06FF_]+)\s*=\s*(?:اسأل|اسال|ask)\s+(.+)$", s, re.I)
         if m:
             name, prompt = m.group(1), m.group(2).strip()
             if not (prompt[:1] in "\"'«"):
                 prompt = '"' + prompt.replace('"', "'") + '"'
             return f"{name} = _dad_ask({prompt})"
-        m = re.match(r"^اسأل\s+(.+?)\s+في\s+([\w\u0600-\u06FF_]+)$", s)
+        m = re.match(r"^(?:اسأل|اسال|ask)\s+(.+?)\s+(?:في|in)\s+([\w\u0600-\u06FF_]+)$", s, re.I)
         if m:
             prompt, name = m.group(1).strip(), m.group(2)
             if not (prompt[:1] in "\"'«"):
                 prompt = '"' + prompt.replace('"', "'") + '"'
             return f"{name} = _dad_ask({prompt})"
-        m = re.match(r"^اسأل\s+(.+)$", s)
+        m = re.match(r"^(?:اسأل|اسال|ask)\s+(.+)$", s, re.I)
         if m:
             prompt = m.group(1).strip()
             if not (prompt[:1] in "\"'«"):
                 prompt = '"' + prompt.replace('"', "'") + '"'
             return f"_dad_ask({prompt})"
 
-    m = re.match(r"^(?:قل|قول)\s+(?!\()(.+)$", s)
+    m = re.match(r"^(?:قل|قول|say|show)\s+(?!\()(.+)$", s, re.I)
     if m:
         what = m.group(1).strip()
         plain = not (what[:1] in "\"'«" or re.search(r"[()\[\]{}=+\-*/<>,،.]", what))
         if plain and (" " in what or what not in _CURRENT_NAMES):
             what = '"' + what.replace('"', "'") + '"'      # قول هلا والله  ←  اطبع("هلا والله")
         return f"اطبع({what})"
-    m = re.match(r"^(?:قل|قول)\s*(\(.*\))$", s)
+    m = re.match(r"^(?:قل|قول|say|show)\s*(\(.*\))$", s, re.I)
     if m: return "اطبع" + m.group(1)
-    m = re.match(r"^(?:ارسم لي|ارسملي|ارسم|رسم)\s+(?!\()(.+)$", s)
+    m = re.match(r"^(?:ارسم لي|ارسملي|ارسم|رسم|draw)\s+(?!\()(.+)$", s, re.I)
     if m:
         what = m.group(1).strip()
         if not (what[:1] in "\"'«" or re.search(r"[()\[\]{}=+]", what)):
             what = '"' + what.replace('"', "'") + '"'          # رسم شمس فوق بحر  ←  ارسم("شمس فوق بحر")
         return f"ارسم({what})"
-    m = re.match(r"^أضف\s+(.+?)\s+إلى\s+([\w\u0600-\u06FF_.]+)$", s)
+    m = re.match(r"^(?:أضف|اضف|add)\s+(.+?)\s+(?:إلى|الى|to)\s+([\w\u0600-\u06FF_.]+)$", s, re.I)
     if m: return f"{m.group(2)}.أضف({m.group(1)})"
     return s
 
@@ -169,14 +185,26 @@ def humanize(src: str) -> str:
         body = line.strip()
         # «كرر اسأل كم عمرك مرتين» — صيغة كلام طبيعية بدون أقواس.
         # نحوّلها للصيغة الحديثة قبل ما تمر على الضاد الكلاسيكية.
-        if re.match(r"^كرر\s+.+\s+مرتين\s*$", body):
-            out.append(ind + "كرر(" + body[len("كرر"):].strip() + ")")
+        if re.match(r"^(?:كرر|rep)\s+.+\s+(?:مرتين|twice)\s*$", body, re.I):
+            kw = "كرر" if body.lower().startswith("كرر") or body.startswith("كرر") else "rep"
+            # keep original command word; vnext accepts both
+            first = body.split()[0]
+            out.append(ind + first + "(" + body[len(first):].strip() + ")")
             continue
-        m = re.match(r"^كرر\s+(.+?)\s+(?:مرات|مرة)\s*:\s*$", body)
+        m = re.match(r"^(?:كرر|rep)\s+(.+?)\s+(?:مرات|مرة|times)\s*:\s*$", body, re.I)
         if m:
             out.append(f"{ind}لكل _ في مدى({m.group(1)}):"); continue
         if not body or body.startswith("#"):
             out.append(line); continue
+        # try/catch as name  →  except Exception as name
+        m = re.match(r"^(?:catch|except|عند_خطأ)\s+(?:باسم|as)\s+(\w+)\s*:?\s*$", body, re.I)
+        if m:
+            out.append(f"{ind}except Exception as {m.group(1)}:"); continue
+        m = re.match(r"^(?:catch|except|عند_خطأ)\s*:?\s*$", body, re.I)
+        if m and not body.startswith("except"):
+            # bare catch / عند_خطأ already become except via the dictionary;
+            # normalize the colon here so a one-word line is a block head.
+            out.append(f"{ind}except:"); continue
         parts = _split_top(body, "ثم")
         first = parts[0].strip()
         if len(parts) > 1 and first.startswith(BLOCK_STARTS) and not first.rstrip().endswith(":"):
@@ -228,11 +256,11 @@ def _known_words():
 
 def _user_names(src: str) -> set:
     names = set()
-    for pat in (r"(?m)^\s*([^\W\d]\w*)\s*=(?!=)", r"اسأل\s+.+?\s+في\s+([\w\u0600-\u06FF_]+)(?:\s|$)",
-                r"لكل\s+(.+?)\s+في\b", r"دالة\s+\w+\s*\(([^)]*)\)", r"def\s+\w+\s*\(([^)]*)\)",
-                r"دالة\s+(\w+)", r"def\s+(\w+)", r"صنف\s+(\w+)", r"باسم\s+(\w+)", r"استورد\s+(\w+)"):
+    for pat in (rf"(?m)^\s*({_IDENT_PY})\s*=(?!=)", rf"اسأل\s+.+?\s+في\s+({_IDENT_PY})(?:\s|$)",
+                r"لكل\s+(.+?)\s+في\b", rf"دالة\s+{_IDENT_PY}\s*\(([^)]*)\)", rf"def\s+{_IDENT_PY}\s*\(([^)]*)\)",
+                rf"دالة\s+({_IDENT_PY})", rf"def\s+({_IDENT_PY})", rf"صنف\s+({_IDENT_PY})", rf"باسم\s+({_IDENT_PY})", rf"استورد\s+({_IDENT_PY})"):
         for m in re.finditer(pat, src):
-            names.update(re.findall(r"[^\W\d]\w*", m.group(1)))
+            names.update(re.findall(_IDENT_PY, m.group(1)))
     return names
 
 
@@ -242,7 +270,11 @@ def _command_spot(src, i, n):
     after = src[i + n:i + n + 2].lstrip()
     if src[i:i + 2] == "ال":                       # كلمات «ال...» غالباً أسماء — تتصحح بس إذا بعدها قوس
         return after.startswith("(")
-    return before in ("", "ثم") or before.endswith((" ثم", ":")) or after.startswith("(")
+    if before in ("", "ثم", "then", "و", "بعدين", "وبعدين", "وبعدها", "عقب", "and") or after.startswith("("):
+        return True
+    if before.endswith((" ثم", " then", ":", " و", " بعدين", " وبعدين", " وبعدها", " عقب", " and")):
+        return True
+    return False
 
 
 def autocorrect(src: str):
@@ -266,9 +298,11 @@ def autocorrect(src: str):
             out.append(src[i:j]); i = j; continue
         if ch in "\"'«":
             quote = "»" if ch == "«" else ch; out.append(ch); i += 1; continue
-        m = re.match(r"[^\W\d_][\w]*", src[i:]) if ch.isalpha() else None
+        m = re.match(_IDENT_WORD, src[i:]) if ch.isalpha() else None
         if m and "\u0600" <= ch <= "\u06FF" and free_text and m.group(0) != "ثم":
-            out.append(m.group(0)); i += len(m.group(0)); continue
+            # After و/ثم/بعدين a typo'd command (قوول) must be corrected so chaining works.
+            if not _command_spot(src, i, len(m.group(0))):
+                out.append(m.group(0)); i += len(m.group(0)); continue
         if m and "\u0600" <= ch <= "\u06FF":
             w = m.group(0); fix = None
             if w == "ثم": free_text = False
@@ -282,8 +316,9 @@ def autocorrect(src: str):
                 if sk in by_skel:
                     fix = by_skel[sk]
                 elif len(w) >= 4 and _command_spot(src, i, len(w)):
-                    # فرق حرف كامل يُصحَّح بس مكان الأمر (أول السطر، بعد ثم، أو قبل قوس) — «الباقي» ما تصير «التالي»
-                    cands = [k for k in words if len(k) >= 3 and _dist1(sk, _skel(k))]
+                    # فرق حرف كامل يُصحَّح بس مكان الأمر، ومن كلمات الأوامر فقط
+                    # حتى لا تصير «ارقد» داخل الكلام «ارفع».
+                    cands = [k for k in HUMAN_WORDS if len(k) >= 3 and _dist1(sk, _skel(k))]
                     if len(cands) == 1: fix = cands[0]
             final = fix if (fix and fix != w) else w
             if final != w:
@@ -322,6 +357,8 @@ def normalize_outside_strings(src: str) -> str:
         if ch in "\"'":
             quote = ch * 3 if src.startswith(ch * 3, i) else ch
             out.append(quote); i += len(quote); continue
+        if ch in _BIDI_CHARS:
+            i += 1; continue
         out.append(ARABIC_PUNCT.get(ch, ch.translate(ARABIC_DIGITS))); i += 1
     return "".join(out)
 
@@ -333,6 +370,17 @@ def _unbalanced_bracket_error(src: str):
     return DadError("فيه قوس أو نص ناقص في البرنامج؛ راجع آخر سطر.")
 
 
+def _user_defined_functions(tokens_list) -> set:
+    """أسماء دالة/def في هذا الملف — لا نترجمها بعد النقطة (ابحث/حمل في صنف المستخدم)."""
+    defined, prev = set(), None
+    for tok in tokens_list:
+        if tok.type == tokenize.NAME and prev is not None and prev.type == tokenize.NAME and prev.string in ("def", "دالة"):
+            defined.add(tok.string)
+        if tok.type not in (tokenize.NL, tokenize.COMMENT, tokenize.NEWLINE):
+            prev = tok
+    return defined
+
+
 def _translate(src: str, names: dict, methods: dict) -> str:
     lines = src.splitlines(keepends=True)
     edits = []                                      # (row, col_start, col_end, new)
@@ -341,10 +389,14 @@ def _translate(src: str, names: dict, methods: dict) -> str:
         tokens_list = list(tokenize.generate_tokens(io.StringIO(src).readline))
     except tokenize.TokenError:
         raise _unbalanced_bracket_error(src) from None
+    defined = _user_defined_functions(tokens_list)
     for tok in tokens_list:
         if tok.type == tokenize.NAME:
             after_dot = prev is not None and prev.type == tokenize.OP and prev.string == "."
-            new = methods.get(tok.string) if after_dot else names.get(tok.string)
+            if after_dot and tok.string in defined:
+                new = None
+            else:
+                new = methods.get(tok.string) if after_dot else names.get(tok.string)
             if not new and not after_dot and names is AR_TO_PY:
                 t = tok.string
                 if t in OPERATORS:
@@ -364,12 +416,86 @@ def _translate(src: str, names: dict, methods: dict) -> str:
 LAST_FIXES = []
 
 
+
+def rewrite_inline_ask(src: str) -> str:
+    """حوّل اسأل «...» داخل تعبير إلى _dad_ask(...)، وليس فقط في أول السطر."""
+    import json
+    import vnext
+    out, i, n, quote = [], 0, len(src), None
+    ident = re.compile(vnext.IDENT_CORE)
+    asks = {vnext.nk("اسأل"), vnext.nk("اسال"), "ask"}
+    while i < n:
+        ch = src[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n and quote not in ("»",):
+                out.append(src[i + 1]); i += 2; continue
+            if (quote == "»" and ch == "»") or (quote not in ("»",) and src.startswith(quote, i)):
+                if quote != "»":
+                    out.append(quote[1:] if False else "")
+                    # handle by startswith already appended ch; if quote is multi, messy
+                quote = None
+                i += 1
+                continue
+            i += 1
+            continue
+        if ch == "#":
+            j = src.find("\n", i); j = n if j == -1 else j
+            out.append(src[i:j]); i = j; continue
+        if ch in "\"'«":
+            quote = "»" if ch == "«" else ch
+            out.append(ch); i += 1; continue
+        m = ident.match(src, i)
+        if m and (vnext.nk(m.group(0)) in asks or vnext.nk(m.group(0)).lower() in asks):
+            j = m.end()
+            while j < n and src[j] in " \t":
+                j += 1
+            if j < n and src[j] == "«":
+                k = src.find("»", j + 1)
+                if k != -1 and "\n" not in src[j:k]:
+                    prompt = src[j + 1:k]
+                    out.append("_dad_ask(" + json.dumps(prompt, ensure_ascii=False) + ")")
+                    i = k + 1
+                    continue
+            elif j < n and src[j] in "\"'":
+                q = src[j]
+                k = j + 1
+                ok = False
+                while k < n:
+                    if src[k] == "\\":
+                        k += 2
+                        continue
+                    if src[k] == "\n":
+                        break
+                    if src[k] == q:
+                        ok = True
+                        break
+                    k += 1
+                if ok:
+                    out.append("_dad_ask(" + src[j:k + 1] + ")")
+                    i = k + 1
+                    continue
+            elif j < n and src[j] == "(":
+                out.append("_dad_ask")
+                i = m.end()
+                continue
+        if m:
+            out.append(m.group(0)); i = m.end(); continue
+        out.append(ch); i += 1
+    return "".join(out)
+
+
 def to_python(dad_src: str, initial_names=None) -> str:
     import vnext
-    dad_src, _ = vnext.expand(dad_src.lstrip("\ufeff"), initial_names)
-    fixed, fixes = autocorrect(normalize_outside_strings(dad_src))
+    src = dad_src.lstrip("\ufeff")
+    # Correct command typos before expand so «قوول هلا و قوول مرحبا» can chain.
+    src, fixes = autocorrect(src)
     LAST_FIXES[:] = fixes
-    return _translate(humanize(fixed), AR_TO_PY, METHODS)
+    dad_src, _ = vnext.expand(src, initial_names)
+    fixed, more = autocorrect(normalize_outside_strings(dad_src))
+    seen = {(w, r) for _ln, w, r in fixes}
+    LAST_FIXES.extend((ln, w, r) for ln, w, r in more if (w, r) not in seen)
+    return _translate(rewrite_inline_ask(humanize(fixed)), AR_TO_PY, METHODS)
 
 
 def to_arabic(py_src: str) -> str:
@@ -555,7 +681,7 @@ def arabic_error(e) -> str:
         return f"«{m.group(1)}» غير معروف — غالباً مكتوب غلط، أو استخدمته قبل ما تعرّفه أو تسأل عنه."
     if name == 'UnboundLocalError':
         return "القيمة غير معرّفة في هذا السياق؛ عرّفها أو اسأل عنها قبل استخدامها."
-    if name in ("SyntaxError",) and getattr(e, "text", None) and re.match(r"\s*(إذا|اذا|لكل|طالما|دالة|وإلا|والا|وإلا_إذا|حاول|عند_خطأ|صنف|مع|if|for|while|def|else|elif|try|except|class|with)\b", e.text or "") and not (e.text or "").rstrip().endswith(":"):
+    if name in ("SyntaxError",) and getattr(e, "text", None) and re.match(r"\s*(إذا|اذا|لكل|طالما|دالة|وإلا|والا|وإلا_إذا|حاول|عند_خطأ|صنف|مع|if|for|while|def|else|elif|try|except|catch|class|with|finally|عند_نجاح)\b", e.text or "") and not (e.text or "").rstrip().endswith(":"):
         return "ناقص نقطتين «:» في آخر السطر — أسطر إذا/لكل/طالما/دالة تنتهي بـ «:»، أو استخدم إذا(...) بالأقواس."
     if name in ("SyntaxError",):
         return "خطأ في كتابة السطر — ناقص قوس ( ) أو نقطتين «:» أو علامة تنصيص، أو فيه كلمة مو في مكانها."
@@ -667,7 +793,7 @@ def run(path: Path):
     for ln, wrong, right in LAST_FIXES:
         print(f"✎ صححت «{wrong}» ← «{right}» (السطر {ln})", file=sys.stderr)
     for ln, note in vnext.NOTES:
-        print(f"{note} (السطر {ln})", file=sys.stderr)
+        print(f"✎ {note} (السطر {ln})", file=sys.stderr)
     os.environ.setdefault("DAD_OUT_DIR", str(path.resolve().parent))
     if os.environ.get("DAD_INTERACTIVE") == "1":
         import builtins, json as _json
@@ -691,7 +817,7 @@ def run(path: Path):
         _p = print
         _ar = {True: "صح", False: "خطأ", None: "لاشيء"}
         env["print"] = lambda *a, **k: _p(*[_ar.get(x, x) if isinstance(x, (bool, type(None))) else x for x in a], **k)
-        exec(compile(code, str(path), "exec"), env)
+        exec(vnext.compile_user_code(code, str(path)), env)
     except SystemExit:
         raise
     except BaseException as e:
@@ -786,7 +912,7 @@ def repl_server():
                     if val is not None and not new_code.strip().startswith(("_dad_", "print(")):
                         print(_ar.get(val, val) if isinstance(val, (bool, type(None))) else val)
                 else:
-                    exec(compile(new_code, "<الطرفية>", "exec"), env)
+                    exec(vnext.compile_user_code(new_code, "<الطرفية>"), env)
                     if n_new == 1 and re.match(r"^\s*الناتج = _dad_(?:num|calc)\(", new_code) and "الناتج" in env:
                         print("= " + str(_dad_num_show(env["الناتج"])))      # احسب في الطرفية يعرض النتيجة
         except vnext.DadError as e:

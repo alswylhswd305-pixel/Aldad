@@ -5,7 +5,7 @@ set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
 echo ======================================
-echo        ALDAD 1.9.17 - START
+echo        NOVAQ 1.9.17 - START
 echo ======================================
 echo.
 
@@ -33,26 +33,26 @@ pause
 exit /b 1
 
 :RUN_PY
-echo [OK] Starting Aldad...
+echo [OK] Starting Novaq...
 py -3 "%~dp0aldad_ide.py"
 set RC=%errorlevel%
 goto END
 
 :RUN_PYTHON
-echo [OK] Starting Aldad...
+echo [OK] Starting Novaq...
 python "%~dp0aldad_ide.py"
 set RC=%errorlevel%
 goto END
 
 :RUN_PYTHON3
-echo [OK] Starting Aldad...
+echo [OK] Starting Novaq...
 python3 "%~dp0aldad_ide.py"
 set RC=%errorlevel%
 
 :END
 if not "%RC%"=="0" (
   echo.
-  echo [ERROR] Aldad stopped with code %RC%.
+  echo [ERROR] Novaq stopped with code %RC%.
   echo Run REPAIR_ALDAD.cmd and send a screenshot if it still fails.
   pause
 )

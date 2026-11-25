@@ -1,5 +1,5 @@
 """
-واجهات الضاد 1.0 — برامج بنوافذ وأزرار وحقول.
+واجهات نوفاك 1.0 — برامج بنوافذ وأزرار وحقول.
 
     برنامج اسمه "حاسبتي"
     افتح نافذة اسمها "الحاسبة"
@@ -81,7 +81,7 @@ class UIProgram:
         self.uses_ai = False
         self.dark = False
         self.full = False
-        self.persona = "أنت مساعد داخل برنامج مكتوب بلغة الضاد. أجب بالعربية باختصار ووضوح."
+        self.persona = "أنت مساعد داخل برنامج مكتوب بلغة نوفاك. أجب بالعربية باختصار ووضوح."
 
     def names(self):
         n = Names()
@@ -360,7 +360,7 @@ body.dark{{--bg:#0d0f14;--card:#12151c;--fg:#e8eaf0;--mut:#8a91a6;--acc:#3b82f6;
 body.full{{padding:0}} body.full .win{{width:100%;min-height:100vh;border:0;border-radius:0;display:flex;flex-direction:column}}
 body.full .body{{flex:1}}
 </style></head><body class="{"dark" if prog.dark else ""} {"full" if prog.full else ""}"><div class="win">
-<div class="bar"><h1>{esc(prog.window or prog.title)}</h1><small>{esc(prog.title)} · الضاد</small></div>
+<div class="bar"><h1>{esc(prog.window or prog.title)}</h1><small>{esc(prog.title)} · نوفاك</small></div>
 <div class="body">{"".join(parts)}<div id="say"></div></div></div>
 <script>
 const R={{}}, H={{}};
@@ -377,8 +377,8 @@ function BIN(op,a,b){{ NUM(a); NUM(b); if((op==="/"||op==="%")&&b===0) throw new
 function SET(n,v){{ const e=el(n); if(!e){{R[n]=v;return;}} if("value" in e && e.tagName!=="OUTPUT") e.value=v; else e.textContent=(v===""?"—":v); R[n]=v; }}
 function FILL(n,items){{ const e=el(n); if(!e||e.tagName!=="SELECT") return; const old=e.value; e.innerHTML=""; (items||[]).forEach(v=>{{const o=document.createElement("option");o.value=String(v);o.textContent=String(v);e.appendChild(o);}}); if(old&&[...e.options].some(o=>o.value===old))e.value=old; else if(e.options.length)e.selectedIndex=0; }}
 let BRIDGE_ID=0; const BRIDGE_WAIT=new Map();
-window.addEventListener("message",e=>{{const d=e.data||{{}}; if(d.dadBridgeReply!==1)return; const p=BRIDGE_WAIT.get(d.id); if(!p)return; BRIDGE_WAIT.delete(d.id); d.ok?p.resolve(d.data||{{}}):p.reject(new Error(d.error||"فشل الاتصال مع ضاد IDE"));}});
-function BRIDGE(action,payload){{ return new Promise((resolve,reject)=>{{ const target=(window.parent!==window?window.parent:window.opener); if(!target) return reject(new Error("هذي العملية تحتاج تشغيل البرنامج من داخل ضاد IDE")); const id=++BRIDGE_ID; BRIDGE_WAIT.set(id,{{resolve,reject}}); target.postMessage({{dadBridge:1,id,action,payload:payload||{{}}}},"*"); setTimeout(()=>{{if(BRIDGE_WAIT.has(id)){{BRIDGE_WAIT.delete(id);reject(new Error("انتهت مهلة الاتصال مع ضاد IDE"));}}}},120000); }}); }}
+window.addEventListener("message",e=>{{const d=e.data||{{}}; if(d.dadBridgeReply!==1)return; const p=BRIDGE_WAIT.get(d.id); if(!p)return; BRIDGE_WAIT.delete(d.id); d.ok?p.resolve(d.data||{{}}):p.reject(new Error(d.error||"فشل الاتصال مع نوفاك IDE"));}});
+function BRIDGE(action,payload){{ return new Promise((resolve,reject)=>{{ const target=(window.parent!==window?window.parent:window.opener); if(!target) return reject(new Error("هذي العملية تحتاج تشغيل البرنامج من داخل نوفاك IDE")); const id=++BRIDGE_ID; BRIDGE_WAIT.set(id,{{resolve,reject}}); target.postMessage({{dadBridge:1,id,action,payload:payload||{{}}}},"*"); setTimeout(()=>{{if(BRIDGE_WAIT.has(id)){{BRIDGE_WAIT.delete(id);reject(new Error("انتهت مهلة الاتصال مع نوفاك IDE"));}}}},120000); }}); }}
 function CLEAR(){{ document.querySelectorAll("[data-n]").forEach(e=>{{ if("value" in e && e.tagName!=="OUTPUT") e.value=""; else e.textContent=(e.tagName==="OUTPUT"?"—":""); }}); SAY(""); }}
 function SAY(t){{ document.getElementById("say").textContent=String(t); }}
 function CNT(x){{ return Array.isArray(x)?x.length:x; }} const SUM=a=>a.reduce((p,c)=>p+NUM(c),0), MAX=a=>Math.max(...a.map(NUM)), MIN=a=>Math.min(...a.map(NUM)), MEAN=a=>a.length?SUM(a)/a.length:0;

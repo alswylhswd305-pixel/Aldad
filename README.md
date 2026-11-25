@@ -1,119 +1,113 @@
-# الضاد — Aldad
+# Novaq (نوفاك)
 
-**الضاد (Aldad)** لغة برمجة عربية مبسطة صُممت لتقليل التعقيد على المبتدئ، مع أوامر قصيرة وطبيعية وقواعد واضحة لا تعتمد على التخمين.
+**Novaq** is a simple programming language for beginners. You write clear commands in Arabic or English, and the program does what the words say.
 
-> الحالة الحالية: **1.9.17 Preview**. هذا إصدار قابل للتجربة والتطوير، وليس إعلانًا أن اللغة مكتملة أو خالية من الأخطاء.
+The older name was **Aldad** / **الضاد**. The language is the same; the official name is now Novaq / نوفاك. File extensions (`.dad`) and internal module names are unchanged.
 
-## الفكرة
+Current version: **1.9.17 Preview**. It is usable and tested, but it is not a claim that the language is finished or free of gaps.
 
-بدل إجبار المبتدئ على صياغة برمجية معقدة، تستخدم الضاد أوامر عربية مباشرة مثل:
+Novaq runs offline. The core language does not use the internet or an AI model.
 
-```dad
-اسأل كم العدد ثم احسب العدد ضرب 2 ثم قول الناتج
-```
+## What it looks like
 
-ومثال آخر:
+Arabic:
 
 ```dad
-احفظ 10 في العدد
-إذا العدد أكبر من أو يساوي 10
-    قول نعم
-وإلا
-    قول لا
+اسأل شنو اسمك واحفظه في الاسم
+قول «أهلا {اسمك}»
+احسب 5 زائد 3 و قول الناتج
 ```
 
-## مبادئ اللغة
+English:
 
-- الكلمة البرمجية لها معنى واضح واحد قدر الإمكان.
-- `ثم` تنفذ الأوامر من اليسار إلى اليمين.
-- `كم` تعني أن البرنامج يحتاج قيمة من المستخدم.
-- `احسب` تحفظ الناتج في `الناتج` ولا تغيّر المتغير الأصلي تلقائيًا.
-- `كمل` تتابع آخر قيمة فعالة ناجحة.
-- الجملة الغامضة أو الناقصة تعطي رسالة خطأ عربية بدل التخمين.
-- تنفيذ اللغة الأساسي لا يحتاج إنترنت أو نموذج ذكاء اصطناعي.
+```dad
+ask what is your name and save it in name
+say "hello {name}"
+calc 5 plus 3 and say result
+```
 
-المواصفة العملية الحالية موجودة في [`rules_ar.md`](rules_ar.md)، وبنية المحرك موضحة في [`SPEC_AR.md`](SPEC_AR.md).
+Other everyday forms that work:
 
-## التشغيل السريع
+```dad
+قول كم الساعة
+شنو التاريخ
+احسب كم جرام في 2 كيلو
+قول اكل ثم نام
+say hi then say bye
+```
 
-### Windows
+- `قول` / `say` prints text.
+- `اسأل` / `ask` asks you a question and stores the answer.
+- `احسب` / `calc` calculates and stores the value in `الناتج` / `result`. It does not print by itself; use `قول الناتج` or `say result`.
+- `و` / `ثم` / `and` / `then` link two clear commands. If `then` is only part of the sentence (`قول اكل ثم نام`), it stays text.
+- `كم الساعة` and `what's the date` show the current time or date; they are not questions to you.
+- Unclear input gets a clear Arabic error with a copyable suggestion. The language does not guess.
 
-1. ثبّت Python 3.9 أو أحدث.
-2. نزّل حزمة الإصدار وفك الضغط.
-3. شغّل `START_ALDAD.cmd`.
+The beginner reference is [`rules_ar.md`](rules_ar.md) (Arabic) and [`rules_en.md`](rules_en.md) (English). The IDE also has a click-to-run **Beginner guide** / **دليل المبتدئ**.
 
-### Linux / macOS
+## Run a program from source
+
+You need Python 3.9 or later.
 
 ```bash
-python3 aldad_ide.py
+python dad.py شغل program.dad
+python dad.py run program.dad
 ```
 
-لتشغيل ملف ضاد مباشرة:
+Both forms do the same thing. If the program asks a question, type the answer and press Enter.
+
+Examples:
 
 ```bash
-python3 dad.py run examples/receipt.dad
+python dad.py شغل example.dad
+python dad.py run examples/receipt.dad
 ```
 
-## إضافة VS Code
-
-الملف `Aldad_VSCode_1.9.17.vsix` هو إضافة VS Code المرفقة مع هذا الإصدار. من VS Code اختر:
-
-`Extensions → Install from VSIX…`
-
-إصدار اللغة هو **1.9.17**، بينما رقم حزمة الإضافة الداخلي هو **2.9.17** للحفاظ على مسار التحديث من الإصدارات السابقة.
-
-## الاختبارات
-
-تثبيت أدوات الاختبار:
+To open the local IDE (browser on this computer only, `127.0.0.1`):
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
+python aldad_ide.py
 ```
 
-تشغيل الاختبارات الحالية:
+On Windows you can also start the IDE with `START_ALDAD.cmd` (the file name is historical; it launches Novaq).
+
+## Run the Windows EXE
+
+A ready Windows build does not need Python installed:
+
+- `Novaq_1.9.17_Windows.exe` — console runner
+- `Novaq_IDE_1.9.17_Windows.exe` — local IDE
+
+Run a file:
+
+```bat
+Novaq_1.9.17_Windows.exe samples\ar_smoke.dad
+Novaq_1.9.17_Windows.exe samples\en_smoke.dad
+```
+
+If the program asks a question, type the answer, or pipe a file:
+
+```bat
+Novaq_1.9.17_Windows.exe samples\ar_smoke.dad < samples\answers_ar.txt
+```
+
+Open an interactive prompt (no file name):
+
+```bat
+Novaq_1.9.17_Windows.exe
+```
+
+Type a command such as `قول «هلا»` or `say "hello"`, then Enter. Type `exit` or `خروج` to leave.
+
+The IDE exe stays on this computer only. Work files are saved in a `work` folder next to the exe, not in Documents.
+
+## Tests
 
 ```bash
-python3 -m pytest current_tests
+python -m pip install -r requirements-dev.txt
+python -m pytest current_tests
 ```
 
-تشغيل التحقق الموسع، بما فيه الاختبارات التاريخية:
+## License
 
-```bash
-python3 verify_all.py --label local
-```
-
-المستودع يحتوي أيضًا على GitHub Actions لتشغيل الاختبارات تلقائيًا على Windows وLinux بعد الرفع.
-
-## حالة 1.9.17
-
-أهم إصلاحات هذا الإصدار تشمل الحساب التفاعلي السياقي، المقارنات العربية المركبة، الأسماء التي تحتوي أرقامًا منفصلة، والتحقق من مدخلات حساب غير سليمة. التفاصيل والأرقام موثقة في [`Aldad_1.9.17_Report_AR.md`](Aldad_1.9.17_Report_AR.md).
-
-لم يتم اعتبار 1.9.17 إصدارًا نهائيًا لأن اختبار Windows الكامل الفعلي ما زال خطوة مطلوبة قبل اعتماد إصدار Stable جديد.
-
-## هيكل المشروع
-
-- `dad.py` — المشغل الرئيسي والتوافق التاريخي.
-- `vnext.py` — تحليل وفهم أوامر اللغة.
-- `aldad_syntax.py` — التحليل النصي والأخطاء البنيوية.
-- `aldad_runtime.py` — الحساب والسياق والقيم الفعالة.
-- `ui.py` — الواجهات المحلية.
-- `aldad_ide.py` — بيئة الضاد التفاعلية.
-- `vscode/` — مصدر إضافة VS Code.
-- `examples/` — أمثلة عملية.
-- `current_tests/` — اختبارات الإصدار الحالي.
-- `tests_legacy/` — اختبارات التوافق التاريخي.
-- `verification/` — سجلات التحقق السابقة.
-
-## المساهمة
-
-اقرأ [`CONTRIBUTING.md`](CONTRIBUTING.md) قبل تعديل قواعد اللغة. أهم قاعدة: لا نضيف صيغة جديدة فقط لجعل اختبار ينجح، ولا نسمح للغة بتخمين قصد المستخدم عندما تكون الجملة غامضة.
-
-## المؤلف والترخيص
-
-Aldad / الضاد — Copyright © 2026 **Saud**.
-
-مرخصة تحت MIT License. راجع [`LICENSE`](LICENSE).
-
----
-
-English overview: see [`README_EN.md`](README_EN.md).
+MIT License — Copyright © 2026 Saud.

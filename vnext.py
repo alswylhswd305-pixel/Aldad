@@ -11,8 +11,9 @@ import ast as py_ast
 import os
 import re
 import sys
+import time
 from aldad_syntax import DadError, split_then, strip_comment, check_syntax, one_group, spans, AI_DISABLED
-from aldad_runtime import evaluate, number
+from aldad_runtime import evaluate, number, dad_divzero, active as _runtime_active
 
 
 # ============================================================================ تنظيف وتوحيد
@@ -20,11 +21,49 @@ AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
 _NORM = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ة": "ه", "ى": "ي", "ـ": ""})
 MAX_LITERAL_DIGITS = 4096
 MAX_DECIMAL_DIGITS = 308
+# التشكيل وعلامات الاتجاه لا تغيّر معنى الأمر: قُول == قول
+_MARKS_RE = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u08D3-\u08E1\u08E3-\u08FF]")
+_BIDI_RE = re.compile(r"[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]")
+# \\w لا يشمل علامات التشكيل، فنضيفها حتى تبقى «غيّر_السعر» و«قُول» كلمة واحدة
+_IDENT_MARKS = r"\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u08D3-\u08E1\u08E3-\u08FF"
+IDENT_CORE = rf"[^\W\d_][\w{_IDENT_MARKS}]*"
+IDENT_PY = rf"(?:[^\W\d_]|_)[\w{_IDENT_MARKS}]*"
+
+
+def strip_marks(w: str) -> str:
+    """يزيل التشكيل وعلامات الاتجاه للمقارنة فقط — ما يغيّر النص الأصلي."""
+    return _BIDI_RE.sub("", _MARKS_RE.sub("", w))
 
 
 def nk(w: str) -> str:
     """شكل موحد للمقارنة فقط (ما يغيّر كلام المستخدم)."""
-    return w.translate(_NORM)
+    return strip_marks(w).translate(_NORM)
+
+
+def strip_bidi_outside_strings(src: str) -> str:
+    """يزيل علامات الاتجاه والعرض من الكود، ويتركها داخل النصوص والتعليقات."""
+    out, i, n, quote = [], 0, len(src), None
+    while i < n:
+        ch = src[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n and quote != "»":
+                out.append(src[i + 1]); i += 2; continue
+            if (quote == "»" and ch == "»") or (quote != "»" and ch == quote):
+                quote = None
+            i += 1
+            continue
+        if ch == "#":
+            j = src.find("\n", i)
+            j = n if j == -1 else j
+            out.append(src[i:j]); i = j; continue
+        if ch in "\"'«":
+            quote = "»" if ch == "«" else ch
+            out.append(ch); i += 1; continue
+        if _BIDI_RE.match(ch):
+            i += 1; continue
+        out.append(ch); i += 1
+    return "".join(out)
 
 
 def key(w: str) -> str:
@@ -39,12 +78,23 @@ def key(w: str) -> str:
     return k
 
 
-TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|«[^»]*»|\d+(?:[.٫]\d+)?|>=|<=|==|!=|[+\-*/×÷%()=<>]|[^\W\d_][\w]*|\S')
+TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|«[^»]*»|\d+(?:[.٫]\d+)?|>=|<=|==|!=|[+\-*/×÷%()=<>]|' + IDENT_CORE + r'|\S')
+
+
+def token_spans(text: str):
+    """الرموز مع مواضعها في النص الأصلي (للفواصل في الاستدعاءات)."""
+    out = []
+    for m in TOKEN_RE.finditer(text):
+        t = m.group(0)
+        if t in ("،", ","):
+            continue
+        val = t if t[:1] in '"\'«' else t.translate(AR_DIGITS)
+        out.append((val, m.start(), m.end()))
+    return out
 
 
 def tokens(text: str):
-    return [t if t[:1] in "\"'«" else t.translate(AR_DIGITS)
-            for t in TOKEN_RE.findall(text) if t not in ("،", ",")]
+    return [val for val, _s, _e in token_spans(text)]
 
 
 def _quoted_value(text):
@@ -140,8 +190,13 @@ def read_number(tk, i):
 
 # ============================================================================ المتغيرات
 def _name_token_ok(tok: str, first: bool = False) -> bool:
-    """اسم الضاد يبدأ بكلمة، ويمكن أن يحتوي أرقامًا كأجزاء لاحقة: «سعر بيع 1»."""
-    if re.fullmatch(r"[^\W\d_]\w*", tok):
+    """اسم الضاد يبدأ بكلمة، ويمكن أن يحتوي أرقامًا كأجزاء لاحقة: «سعر بيع 1».
+
+    يُسمح أيضًا بأسماء بايثون الخاصة مثل __init__، ما عدا البادئة المحجوزة _dad.
+    """
+    if re.fullmatch(IDENT_CORE, tok):
+        return True
+    if re.fullmatch(IDENT_PY, tok) and tok.startswith("_") and not tok.startswith("_dad"):
         return True
     return (not first) and bool(re.fullmatch(r"\d+", tok))
 
@@ -237,7 +292,7 @@ class Names:
             tok = tk[stop]
             if not _name_token_ok(tok, first=(stop == i)):
                 break
-            if nk(tok) in OP_WORDS:
+            if _op_sym(tok):
                 break
             stop += 1
         for j in range(stop, i, -1):
@@ -252,15 +307,28 @@ class Names:
 OP_WORDS = {nk(w): s for w, s in [("زائد", "+"), ("زايد", "+"), ("وزائد", "+"), ("زيد", "+"), ("اطرح", "-"), ("منه", "-"),
             ("اضرب", "*"), ("اقسم", "/"), ("تكعيب", "**3"), ("ناقص", "-"), ("الا", "-"),
             ("ضرب", "*"), ("ضربه", "*"), ("مضروب", "*"), ("مضروبه", "*"), ("قسمه", "/"), ("مقسوم", "/"),
-            ("اس", "**"), ("تربيع", "**2")]}
+            ("اس", "**"), ("تربيع", "**2"),
+            ("plus", "+"), ("minus", "-"), ("times", "*"), ("multiplied", "*"),
+            ("divided", "/"), ("mul", "*"), ("div", "/"),
+            ("pow", "**"), ("sq", "**2"), ("cube", "**3")]}
 SYM_OPS = {"+": "+", "-": "-", "*": "*", "×": "*", "/": "/", "÷": "/", "(": "(", ")": ")", "%": "%"}
+
+def _op_sym(tok):
+    k = nk(tok)
+    if k in OP_WORDS:
+        return OP_WORDS[k]
+    if k.isascii() and k.lower() in OP_WORDS:
+        return OP_WORDS[k.lower()]
+    return None
 FILLER = {nk(w) for w in ("احسب", "احسبلي", "كم", "يساوي", "يطلع", "الناتج", "ناتج", "النتيجة", "النتيجه", "لي",
-                          "على", "في", "=", "؟", "?", "!", ".", "بالله", "لو", "سمحت")}
+                          "على", "في", "=", "؟", "?", "!", ".", "بالله", "لو", "سمحت",
+                          "how", "many", "much", "of", "by")}
 
 
 def items_of(text, names: Names):
     """يحول الكلام لقائمة عناصر: ('num',v) ('var',name) ('op',s) ('word',w)."""
-    tk = tokens(text)
+    spans = token_spans(text)
+    tk = [v for v, _s, _e in spans]
     out, i = [], 0
     while i < len(tk):
         t = tk[i]
@@ -276,6 +344,11 @@ def items_of(text, names: Names):
             if mm:
                 vv, used = mm
                 out.append(("raw", f"({vv}) ** 0.5")); i += 1 + used; continue
+        # A user name such as نصف wins over the fraction word 0.5.
+        mm = names.match_tokens(tk, i)
+        if mm:
+            vv, used = mm
+            out.append(("var", vv)); i += used; continue
         r = read_number(tk, i)
         if r:
             out.append(("num", r[0]))
@@ -286,28 +359,106 @@ def items_of(text, names: Names):
             if frac and i < len(tk) and (read_number(tk, i) or names.find(tk[i])):
                 out.append(("op", "*"))                          # ثلث 90 / نص الراتب
             continue
+        # س.اسم / نقطة.س
+        if t == "." and out and out[-1][0] in ("var", "raw", "word") and i + 1 < len(tk):
+            attr = tk[i + 1]
+            if _name_token_ok(attr, first=True) or (attr and attr.isidentifier()):
+                base = out.pop()[1]
+                out.append(("raw", f"{base}.{attr}"))
+                i += 2
+                continue
+        # طول(الاسم) / ن.مجموع()
+        if t == "(" and out and out[-1][0] in ("var", "raw", "word"):
+            depth = 1
+            j = i + 1
+            while j < len(tk) and depth:
+                if tk[j] == "(":
+                    depth += 1
+                elif tk[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                func = out.pop()[1]
+                arg_src = text[spans[i][2]:spans[j - 1][1]]
+                out.append(("raw", f"{func}({_format_call_args(arg_src, names)})"))
+                i = j
+                continue
         if t in SYM_OPS:
             out.append(("op", SYM_OPS[t])); i += 1; continue
         k = nk(t)
         if out and out[-1][0] == "num" and (k in UNIT_WORDS or k.rstrip("ات") in UNIT_WORDS or k in {"دنانير", "دراهم", "ريالات", "امتار", "كيلوات", "ساعات", "ايام", "حبات", "قطع"}):
             i += 1; continue                                    # نص دينار / 3 ساعات ← الوحدة ما تغيّر الحساب
-        if k in OP_WORDS:
-            out.append(("op", OP_WORDS[k])); i += 1; continue
+        if _op_sym(t) or k in OP_WORDS:
+            out.append(("op", _op_sym(t) or OP_WORDS[k])); i += 1; continue
         if k in ("في", "علي") and out and out[-1][0] in ("num", "var") and i + 1 < len(tk):
             nxt_num = read_number(tk, i + 1)
             nxt_var = names.match_tokens(tk, i + 1)
             if nxt_num or nxt_var:
                 out.append(("op", "*" if k == "في" else "/")); i += 1; continue
-        if t.startswith("و") and len(t) > 1 and (nk(t[1:]) in OP_WORDS):
-            out.append(("op", OP_WORDS[nk(t[1:])])); i += 1; continue
+        if t.startswith("و") and len(t) > 1 and _op_sym(t[1:]):
+            out.append(("op", _op_sym(t[1:]))); i += 1; continue
         mm = names.match_tokens(tk, i)
         if mm:
             v, used = mm
             out.append(("var", v)); i += used; continue
-        if t[:1] in "\"'«":
+        if t[:1] in '"\'«':
             out.append(("text", _quoted_value(t))); i += 1; continue
         out.append(("word", t)); i += 1
     return out
+
+
+
+def _split_top_commas(s):
+    """يقسم حدود الدالة على الفواصل العلوية فقط."""
+    parts, cur, depth, quote, i = [], [], 0, None, 0
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < len(s) and quote != "»":
+                cur.append(s[i + 1]); i += 2; continue
+            if (quote == "»" and ch == "»") or (quote != "»" and ch == quote):
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'«":
+            quote = "»" if ch == "«" else ch
+            cur.append(ch); i += 1; continue
+        if ch in "({[":
+            depth += 1; cur.append(ch); i += 1; continue
+        if ch in ")}]":
+            depth = max(0, depth - 1); cur.append(ch); i += 1; continue
+        if ch in ",،" and depth == 0:
+            parts.append("".join(cur)); cur = []; i += 1; continue
+        cur.append(ch); i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def _format_call_args(arg_src, names):
+    arg_src = arg_src.strip()
+    if not arg_src:
+        return ""
+    formatted = []
+    for piece in _split_top_commas(arg_src):
+        piece = piece.strip()
+        if not piece:
+            continue
+        items = items_of(piece, names)
+        me = math_expr(items)
+        if me:
+            formatted.append(me[0])
+        elif len(items) == 1 and items[0][0] in ("var", "raw", "num", "text"):
+            kind, val = items[0]
+            if kind == "text":
+                formatted.append(json.dumps(val, ensure_ascii=False))
+            elif kind == "num":
+                formatted.append(_fmt(val))
+            else:
+                formatted.append(val)
+        else:
+            formatted.append(piece)
+    return ", ".join(formatted)
 
 
 def _fmt(v):
@@ -439,16 +590,28 @@ def parse_story(text, names):
 
 
 UNITS_CONV = {}
-for _grp in [[("طن", 1000000), ("كيلو", 1000), ("كيلوجرام", 1000), ("كغ", 1000), ("جرام", 1), ("غرام", 1), ("جم", 1)],
-             [("كيلومتر", 100000), ("متر", 100), ("سنتي", 1), ("سانتي", 1), ("سنتيمتر", 1), ("سم", 1), ("مليمتر", 0.1), ("ملي", 0.1)],
-             [("سنه", 31536000), ("اسبوع", 604800), ("يوم", 86400), ("ساعه", 3600), ("دقيقه", 60), ("ثانيه", 1)],
-             [("لتر", 1000), ("مل", 1), ("مليلتر", 1)],
+for _grp in [[("طن", 1000000), ("كيلو", 1000), ("كيلوجرام", 1000), ("كغ", 1000), ("جرام", 1), ("غرام", 1), ("جم", 1),
+              ("ton", 1000000), ("kilo", 1000), ("kilogram", 1000), ("kg", 1000), ("gram", 1)],
+             [("كيلومتر", 100000), ("متر", 100), ("سنتي", 1), ("سانتي", 1), ("سنتيمتر", 1), ("سم", 1), ("مليمتر", 0.1), ("ملي", 0.1),
+              ("kilometer", 100000), ("kilometre", 100000), ("km", 100000), ("meter", 100), ("metre", 100),
+              ("centimeter", 1), ("centimetre", 1), ("cm", 1)],
+             [("سنه", 31536000), ("اسبوع", 604800), ("يوم", 86400), ("ساعه", 3600), ("دقيقه", 60), ("ثانيه", 1),
+              ("year", 31536000), ("week", 604800), ("day", 86400), ("hour", 3600), ("minute", 60), ("min", 60), ("second", 1)],
+             [("لتر", 1000), ("مل", 1), ("مليلتر", 1), ("liter", 1000), ("litre", 1000)],
              [("دينار", 1000), ("فلس", 1)]]:
     for _n, _f in _grp:
         UNITS_CONV[nk(_n)] = (id(_grp), _f)
+        if str(_n).isascii():
+            UNITS_CONV[_n.lower()] = (id(_grp), _f)
 _PLURALS = {nk(k): nk(v) for k, v in [("كيلوات", "كيلو"), ("جرامات", "جرام"), ("غرامات", "غرام"), ("امتار", "متر"), ("سنتيات", "سنتي"),
             ("ساعات", "ساعه"), ("دقايق", "دقيقه"), ("دقائق", "دقيقه"), ("ثواني", "ثانيه"), ("ايام", "يوم"), ("اسابيع", "اسبوع"),
-            ("سنين", "سنه"), ("سنوات", "سنه"), ("لترات", "لتر"), ("دنانير", "دينار"), ("فلوس", "فلس"), ("اطنان", "طن")]}
+            ("سنين", "سنه"), ("سنوات", "سنه"), ("لترات", "لتر"), ("دنانير", "دينار"), ("فلوس", "فلس"), ("اطنان", "طن"),
+            ("kilos", "kilo"), ("kilograms", "kilogram"), ("grams", "gram"),
+            ("kilometers", "kilometer"), ("kilometres", "kilometre"), ("meters", "meter"), ("metres", "metre"),
+            ("centimeters", "centimeter"), ("centimetres", "centimetre"),
+            ("years", "year"), ("weeks", "week"), ("days", "day"), ("hours", "hour"),
+            ("minutes", "minute"), ("mins", "min"), ("seconds", "second"),
+            ("liters", "liter"), ("litres", "litre"), ("tons", "ton")]}
 
 
 def _unit(w):
@@ -457,7 +620,14 @@ def _unit(w):
         if k.startswith(pre) and (k[len(pre):] in UNITS_CONV or k[len(pre):] in _PLURALS):
             k = k[len(pre):]; break
     k = _PLURALS.get(k, k)
-    return k if k in UNITS_CONV else None
+    if k in UNITS_CONV:
+        return k
+    if k.isascii():
+        kl = k.lower()
+        kl = _PLURALS.get(kl, _PLURALS.get(nk(kl), kl))
+        if kl in UNITS_CONV:
+            return kl
+    return None
 
 
 def parse_convert(text, names=None):
@@ -485,7 +655,10 @@ def parse_convert(text, names=None):
         u = _unit(t)
         if u:
             if u_from is None and num is None:
-                u_to = u_to or u                               # كم دقيقة في ...
+                if u_to is None:
+                    u_to = u                                   # كم دقيقة في ...
+                else:
+                    u_from = u                                 # كم ثانية في ساعة (بلا رقم = 1)
             elif u_from is None:
                 u_from = u
             else:
@@ -493,6 +666,8 @@ def parse_convert(text, names=None):
         elif nk(t).endswith(("تين", "ين")) and _unit(t[:-3] + "ه" if t.endswith("تين") else t[:-2]):
             num = 2 if num is None else num; u_from = _unit(t[:-3] + "ه" if t.endswith("تين") else t[:-2])
         i += 1
+    if num is None and u_from and u_to and u_from != u_to:
+        num = 1  # كم ثانية في ساعة → 1 ساعة
     if num is None or not u_from or not u_to or u_from == u_to:
         return None
     (g1, f1), (g2, f2) = UNITS_CONV[u_from], UNITS_CONV[u_to]
@@ -502,21 +677,37 @@ def parse_convert(text, names=None):
     return f"{base} * {f1} / {f2}"
 
 def parse_calc(text, names: Names):
-    if re.match(r"^كم(?:\s|$)", text.strip()):
-        ask = parse_ask(text, names)
-        return {"op": "SEQ", "body": [ask, {"op": "CALC", "expr": ask["var"], "say": text.strip()}]}
+    t0 = text.strip()
+    kind = _now_kind(t0)
+    if kind:
+        return {"op": "CALC", "expr": f"_dad_now({kind!r})", "say": t0}
+    cv0 = parse_convert(t0, names)
+    if cv0:
+        return {"op": "CALC", "expr": cv0, "say": t0}
+    if re.match(r"^كم(?:\s|$)", t0):
+        rest = re.sub(r"^كم\s+", "", t0).strip()
+        cv = parse_convert(rest, names) if rest else None
+        if cv:
+            return {"op": "CALC", "expr": cv, "say": t0}
+        if rest:
+            items = items_of(rest, names)
+            me = math_expr(items)
+            if me:
+                return {"op": "CALC", "expr": me[0], "say": me[1]}
+        ask = parse_ask(t0, names)
+        return {"op": "SEQ", "body": [ask, {"op": "CALC", "expr": ask["var"], "say": t0}]}
     tk = tokens(text)
     # لا نتسامح مع رموز زائدة تغيّر المعنى بصمت. النقطة مسموحة فقط كعلامة نهاية جملة.
     if "." in tk[:-1]:
         raise DadError("في الحساب نقطة بمكان غير صحيح — احذفها أو ضعها في نهاية الجملة.")
     if len(tk) >= 2 and tk[0] in ("+", "-") and tk[1] in ("+", "-"):
         raise DadError(f"فيه علامتان متتاليتان «{tk[0]}{tk[1]}» — اكتب علامة واحدة فقط.")
-    if tk and (nk(tk[-1]) in OP_WORDS or tk[-1] in ("+", "-", "*", "/", "×", "÷")):
-        op = OP_WORDS.get(nk(tk[-1]), tk[-1])
+    if tk and (_op_sym(tk[-1]) or tk[-1] in ("+", "-", "*", "/", "×", "÷")):
+        op = _op_sym(tk[-1]) or tk[-1]
         if op not in ("**2", "**3"):
             raise DadError(f"ما فهمت الحساب — العملية ناقصة: اكتب رقمًا أو قيمة بعد «{tk[-1]}».")
     for a, b in zip(tk, tk[1:]):
-        oa, ob = OP_WORDS.get(nk(a), SYM_OPS.get(a)), OP_WORDS.get(nk(b), SYM_OPS.get(b))
+        oa, ob = (_op_sym(a) or SYM_OPS.get(a)), (_op_sym(b) or SYM_OPS.get(b))
         if oa in ("+", "-", "*", "/", "**") and ob in ("*", "/", "**"):
             raise DadError(f"فيه عمليتين متتاليتين «{a} {b}»؛ اكتب قيمة بينهما.")
     lq = list_query(text, names)
@@ -529,7 +720,7 @@ def parse_calc(text, names: Names):
     if st:
         return {"op": "CALC", "expr": st, "say": st}
     calc_tokens = tokens(text)
-    has_arith = any((nk(t) in OP_WORDS) or (t in SYM_OPS and t not in ("(", ")")) for t in calc_tokens)
+    has_arith = any(_op_sym(t) or (t in SYM_OPS and t not in ("(", ")")) for t in calc_tokens)
     m = None if has_arith else re.match(r"^(?:كم\s+)?(?:عدد|طول)\s+(.+?)\s*[؟?]?$", text.strip())
     if m:
         thing = m.group(1).strip(); v = names.find(thing)
@@ -614,7 +805,7 @@ def _ask_for(thing, names):
     return {"op": "INPUT", "var": name, "prompt": prompt, "numeric": True}
 
 
-_IDENT_RE = re.compile(r"^[^\W\d]\w*$")
+_IDENT_RE = re.compile(rf"^{IDENT_PY}$")
 _COUNT_PREP = {nk(w) for w in (
     "في", "من", "على", "عن", "إلى", "الى", "عند", "لدى",
     "داخل", "وسط", "جنب", "فوق", "تحت", "بين", "مع",
@@ -655,18 +846,282 @@ def _unknown_count(thing):
                     [f"{name} = 12", f"اسأل(كم عدد {name})", f"{name} = [\"بيضة\"، \"بيضة\"]"])
 
 
+def _output_concat_ok(text):
+    """True when the output body is quoted pieces joined by + (and identifiers)."""
+    s = text.strip()
+    if not s or s[0] not in "\"'«" and not re.match(rf"{IDENT_PY}", s):
+        return False
+    try:
+        compile("(" + s + ")", "<say>", "eval")
+    except SyntaxError:
+        return False
+    return True
+
+
+
+def _interp_brace_expr(expr, names):
+    expr = expr.strip()
+    if not expr:
+        raise DadError("القوس {} داخل النص فارغ. اكتب اسم متغير أو تعبيراً، مثل: قول «هلا {الاسم}».")
+    if len(expr) >= 2 and expr[0] == "(" and expr[-1] == ")":
+        expr = expr[1:-1].strip()
+        if not expr:
+            raise DadError("القوس {} داخل النص فارغ. اكتب اسم متغير أو تعبيراً، مثل: قول «هلا {الاسم}».")
+    known = names.find(expr)
+    if known:
+        return known
+    try:
+        compile(expr, "<interp>", "eval")
+        # A bare identifier that compiled but is not a known name: don't wait for a Python NameError.
+        if re.fullmatch(IDENT_CORE, expr) or (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", expr)):
+            raise DadError(
+                f"ما عندي قيمة لـ «{expr}» داخل النص. اسأل عنه أول أو احفظ قيمة فيه.",
+                [f"اسأل شنو {expr}", f"احفظ «…» في {expr}", f"قول «أهلا {{{expr}}}»"],
+            )
+        return expr
+    except SyntaxError:
+        pass
+    if ":" in expr:
+        left, spec = expr.split(":", 1)
+        try:
+            compile(left.strip(), "<interp>", "eval")
+            return f"{left.strip()}:{spec}"
+        except SyntaxError:
+            pass
+    items = items_of(expr, names)
+    me = math_expr(items)
+    if me:
+        return me[0]
+    raise DadError(f"ما فهمت «{{{expr}}}» داخل النص. مثل: قول «مرحبا {{الاسم}}».")
+
+
+def _fstring_expr(inner, names):
+    """Turn «مرحبا {الاسم}» / \"hello {name}\" into a Python f-string."""
+    out, i, n = [], 0, len(inner)
+    while i < n:
+        if inner.startswith("{{", i):
+            out.append("{{")
+            i += 2
+            continue
+        if inner.startswith("}}", i):
+            out.append("}}")
+            i += 2
+            continue
+        if inner[i] == "{":
+            j = inner.find("}", i + 1)
+            if j < 0:
+                raise DadError("قوس { داخل النص ما انقفل. مثل: قول «هلا {الاسم}».")
+            out.append("{")
+            out.append(_interp_brace_expr(inner[i + 1:j], names))
+            out.append("}")
+            i = j + 1
+            continue
+        if inner[i] == "}":
+            raise DadError("قوس } داخل النص بلا { يفتحه.")
+        ch = inner[i]
+        if ch in '\\"':
+            out.append("\\" + ch)
+        elif ch == "\n":
+            out.append("\\n")
+        else:
+            out.append(ch)
+        i += 1
+    return 'f"' + "".join(out) + '"'
+
+
+_SLICE_RE = re.compile(
+    r"^(?:قطعة|slice)\s+(.+?)\s+(?:من|from)\s+(.+?)(?:\s+(?:إلى|الى|to)\s+(.+))?$",
+    re.I,
+)
+
+
+def _slice_phrase(text, names):
+    """قطعة القائمة من 1 إلى 3 / slice list from 1 to 3 — 1-based inclusive."""
+    m = _SLICE_RE.match(text.strip())
+    if not m:
+        return None
+    coll, start, end = m.group(1).strip(), m.group(2).strip(), (m.group(3) or "").strip()
+    def _bit(src):
+        a = parse_output(src, names)
+        if a["op"] != "OUTPUT":
+            raise DadError("ما فهمت حدود القطع. استخدم أرقاماً أو أسماء، مثل: قطعة القائمة من 1 إلى 3.")
+        return a["expr"]
+    if end:
+        return f"_dad_slice({_bit(coll)}, {_bit(start)}, {_bit(end)})"
+    return f"_dad_slice({_bit(coll)}, {_bit(start)})"
+
+
+def _boolean_literal(text):
+    k = nk(text.strip())
+    if k in {nk("صح"), "true", "True"}:
+        return "True"
+    if k in {nk("خطأ"), nk("خطا"), "false", "False"}:
+        return "False"
+    return None
+
+
+def _output_subscript_ok(text):
+    s = text.strip()
+    if "[" not in s or not s.endswith("]"):
+        return False
+    try:
+        compile(s, "<say>", "eval")
+    except SyntaxError:
+        return False
+    return True
+
+
+def _unwrap_paren_names(text, names: Names):
+    """قول اهلا (الاسم) → variable interpolation.
+
+    Do not touch typ(العلم) / next(it) (a call with no space before '('),
+    or nested groups like (اكتب (نعم) هنا).
+    """
+    unknown = []
+
+    def is_var_like(s):
+        s = s.strip()
+        if not s or re.search(r"[+\-*/×÷=<>]", s):
+            return False
+        if names.find(s):
+            return True
+        if s[:1].isascii() and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s):
+            return True
+        if nk(s).startswith("ال") and len(nk(s)) > 2:
+            return True
+        # اسمك / عمرك — ضمير ملكية
+        if key(s) != nk(s) and len(s) >= 3:
+            return True
+        bits = tokens(s)
+        if len(bits) >= 2 and all(re.match(IDENT_CORE, w) or re.match(r"[A-Za-z_][A-Za-z0-9_]*", w) for w in bits):
+            return True
+        return False
+
+    def ident_char(ch):
+        return ch.isalnum() or ch == "_" or "\u0600" <= ch <= "\u06FF"
+
+    out, i, n = [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "(":
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                out.append(ch)
+                i += 1
+                continue
+            inner = text[i + 1:j - 1]
+            call = i > 0 and ident_char(text[i - 1])
+            if (not call) and "(" not in inner and ")" not in inner and is_var_like(inner):
+                s = inner.strip()
+                if names.find(s):
+                    out.append(" " + s + " ")
+                else:
+                    unknown.append(s)
+                    out.append(" " + s + " ")
+                i = j
+                continue
+            out.append(text[i:j])
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    if unknown:
+        u = unknown[0]
+        raise DadError(
+            f"ما عندي قيمة لـ «{u}» بعد. اسأل عنه أول أو احفظ قيمة فيه.",
+            [f"اسأل شنو {u}", f"احفظ «…» في {u}", f"قول اهلا ({u})"],
+        )
+    return "".join(out)
+
+
+def _now_kind(text):
+    """Return 'time' or 'date' for clock/date phrases, else None.
+
+    كم الساعة / كم الوقت / شنو التاريخ — current time or date, not a question.
+    A tightly matched phrase only; «كم عدد البيض» and «اسأل كم العمر» stay asks.
+    """
+    if not text:
+        return None
+    t = text.strip()
+    t = re.sub(
+        r"^(?:قول|قل|اطبع|اعرض|say|show|ask|اسأل|أسأل|اسال)\s+",
+        "",
+        t,
+        count=1,
+        flags=re.I,
+    ).strip()
+    t = t.rstrip("؟?! !.،,").strip()
+    t = re.sub(r"^(?:please\s+)?(?:tell\s+me\s+)?", "", t, flags=re.I).strip()
+    compact = re.sub(r"\s+", " ", t)
+    ar = nk(compact)
+    # time
+    if re.fullmatch(r"(?:كم\s+)?(?:الساعه|الساعة|الوقت)(?:\s+(?:الان|الآن|الحين))?", ar):
+        return "time"
+    if re.fullmatch(r"(?:الساعه|الساعة|الوقت)\s+كم", ar):
+        return "time"
+    if re.fullmatch(r"(?:what(?:\s+is)?\s+)?(?:the\s+)?time(?:\s+is\s+it)?", compact, re.I):
+        return "time"
+    if re.fullmatch(r"what\s+time(?:\s+is\s+it)?", compact, re.I):
+        return "time"
+    # date
+    if re.fullmatch(r"(?:(?:كم|وش|شنو|ما|ايش|ماهو)\s+)?(?:التاريخ|تاريخ\s+اليوم)(?:\s+(?:اليوم|الحين|الان|الآن))?", ar):
+        return "date"
+    if re.fullmatch(r"(?:وش|شنو|ما|ايش)\s+(?:اليوم)", ar):
+        return "date"
+    if re.fullmatch(r"(?:what(?:\s+is)?\s+)?(?:the\s+)?date(?:\s+(?:is\s+it|today))?", compact, re.I):
+        return "date"
+    if re.fullmatch(r"what(?:\s+is)?\s+today(?:s)?\s+date", compact, re.I):
+        return "date"
+    return None
+
+
 def parse_output(text, names: Names):
+
     t = text.strip()
     if not t:
         return {"op": "OUTPUT", "expr": '""'}
-    if len(tokens(t)) == 1 and t[:1] in "\"'«":
-        return {"op": "OUTPUT", "expr": json.dumps(_quoted_value(t), ensure_ascii=False)}
+    if "(" in t and ")" in t and not (t[:1] in "\"«'" and (t.endswith('"') or t.endswith("'") or t.endswith("»"))):
+        t = _unwrap_paren_names(t, names).strip()
+        if not t:
+            return {"op": "OUTPUT", "expr": '""'}
+    if t[:1] in "\"'«" and (t.endswith('"') or t.endswith("'") or t.endswith("»")):
+        inner = _quoted_value(t)
+        if "{" in inner:
+            return {"op": "OUTPUT", "expr": _fstring_expr(inner, names)}
+        if len(tokens(t)) == 1:
+            return {"op": "OUTPUT", "expr": json.dumps(inner, ensure_ascii=False)}
+    slice_expr = _slice_phrase(t, names)
+    if slice_expr is not None:
+        return {"op": "OUTPUT", "expr": slice_expr}
+    bool_lit = _boolean_literal(t)
+    if bool_lit is not None:
+        return {"op": "OUTPUT", "expr": bool_lit}
+    if _output_subscript_ok(t):
+        return {"op": "OUTPUT", "expr": t}
+    # "Hello " + name  /  «المجموع » + القيمة
+    # Keep the expression as Python so function parameters work even if they
+    # were not registered in Names (say("RESULT " + kind + " " + text)).
+    if "+" in t and re.search(r'["\'«]', t) and _output_concat_ok(t):
+        return {"op": "OUTPUT", "expr": t}
     if re.fullmatch(r'[-+]?\d+(?:[.٫]\d+)?', t):
         return {"op": "OUTPUT", "expr": t.translate(AR_DIGITS)}
+    exact_name = names.find(t.rstrip("؟?"))
+    kind = _now_kind(t)
+    if kind:
+        # قول الساعة uses a user variable of that name if one exists.
+        if exact_name and re.fullmatch(r"(?:الساعه|الساعة|الوقت|التاريخ)", t.rstrip("؟? ")):
+            return {"op": "OUTPUT", "expr": exact_name}
+        return {"op": "OUTPUT", "expr": f"_dad_now({kind!r})"}
     if re.match(r"^كم(?:\s|$)", t):
         ask = parse_ask(t, names)
         return {"op": "SEQ", "body": [ask, {"op": "OUTPUT", "expr": ask["var"]}]}
-    full = names.find(t.rstrip("؟?"))
+    full = exact_name
     if full:                                                # «عدد مرات التكرار» اسم كامل ← قيمته، مو طلب عدّ
         return {"op": "OUTPUT", "expr": full}
     m = re.match(r"^(?:كم\s+)?(?:عدد|طول)\s+(.+?)\s*[؟?]?$", t)
@@ -686,10 +1141,6 @@ def parse_output(text, names: Names):
     if tq in (nk("الناتج"), nk("المحتوى")):                   # قل(الناتج) قبل أي احسب
         raise DadError(f"ما في «{t}» لين الحين — {'احسب شي قبله' if tq == nk('الناتج') else 'افتح ملف قبله'}.",
                        ["احسب(5 زائد 3) ثم قل(الناتج)"] if tq == nk("الناتج") else ["افتح(ملف.txt) ثم قل(المحتوى)"])
-    if re.fullmatch(r"(?:كم\s+)?(?:الساعه|الساعة|الوقت)", t.rstrip("؟? ")):
-        return {"op": "OUTPUT", "expr": "_dad_now('time')"}
-    if re.fullmatch(r"(?:وش\s+|ما\s+|شنو\s+)?(?:التاريخ|اليوم|تاريخ\s+اليوم)", t.rstrip("؟? ")):
-        return {"op": "OUTPUT", "expr": "_dad_now('date')"}
     lq = list_query(t, names)
     if lq:
         return {"op": "OUTPUT", "expr": lq}
@@ -699,10 +1150,14 @@ def parse_output(text, names: Names):
         except DadError:
             pass
     items = items_of(t, names)
-    if any(x[0] == "op" for x in items) or (any(x[0] == "var" for x in items) and not any(x[0] in ("word", "text") for x in items)):
+    if any(x[0] == "op" for x in items) or (any(x[0] in ("var", "raw") for x in items) and not any(x[0] in ("word", "text") for x in items)):
         me = math_expr(items)
         if me:
-            return {"op": "OUTPUT", "expr": _evaluate_call(me[0])}
+            expr = me[0]
+            # ن.س / طول(الاسم) تعبير بايثون مباشر، ومحرك الحساب لا يدعم النقطة أو الاستدعاء.
+            if any(x[0] == "raw" for x in items):
+                return {"op": "OUTPUT", "expr": expr}
+            return {"op": "OUTPUT", "expr": _evaluate_call(expr)}
     unknown_w = [x[1] for x in items if x[0] == "word" and nk(x[1]) not in FILLER]
     if any(x[0] == "op" for x in items) and unknown_w and any(x[0] in ("num", "var") for x in items):
         return {"op": "OUTPUT", "expr": json.dumps(t, ensure_ascii=False),
@@ -721,7 +1176,7 @@ def parse_output(text, names: Names):
             j += 1
         return {"op": "OUTPUT", "expr": ", ".join(parts)}
     one = t.rstrip("؟?.! ")
-    if re.fullmatch(r"ال[^\W\d_]\w*", one):                    # كلمة وحدة تبدأ بـ «ال» وما انعرفت: نطبعها وننبه
+    if re.fullmatch(rf"ال{IDENT_CORE}", one):                    # كلمة وحدة تبدأ بـ «ال» وما انعرفت: نطبعها وننبه
         return {"op": "OUTPUT", "expr": json.dumps(t, ensure_ascii=False),
                 "note": f"«{one}» مو متغير معروف — طبعتها ككلام. إذا تقصد متغير، عرّفه أول."}
     return {"op": "OUTPUT", "expr": json.dumps(t, ensure_ascii=False)}
@@ -735,23 +1190,49 @@ def _implicit_value_name(q: str):
     """يستخرج اسم القيمة من سؤال طبيعي بدون ذكاء اصطناعي.
 
     القاعدة ثابتة:
-    - نشيل كلمة السؤال الأولى مثل «كم».
-    - نأخذ العبارة إلى أول حرف جر سياقي (في/من/على...).
+    - نشيل كلمة السؤال الأولى مثل «كم» أو what/how.
+    - نأخذ العبارة إلى أول حرف جر سياقي (في/من/على/in...).
     - العبارة كلها اسم واحد، حتى لو فيها أكثر من كلمة: «سعر القطعة»، «عدد البيض».
     """
+    en_q = {"what", "whats", "how", "who", "when", "where", "why", "which"}
+    en_front = {"is", "are", "was", "were", "your", "my", "the", "a", "an", "many", "much", "do", "does", "did"}
+    en_trail = {"you", "please", "now", "there"}
     words = [w for w in tokens(q) if re.match(r"[^\W\d_]", w)]
-    if words and nk(words[0]) in QUESTION_WORDS:
+    # "what's" may arrive already split or as whats after contraction softening.
+    flat = []
+    for w in words:
+        lw = w.lower().replace("'", "")
+        if lw == "whats":
+            flat.extend(["what", "is"])
+        else:
+            flat.append(w)
+    words = flat
+    if words and (nk(words[0]) in QUESTION_WORDS or words[0].lower() in en_q):
         words = words[1:]
+    while words and words[0].lower() in en_front:
+        words = words[1:]
+    while words and words[-1].lower() in en_trail:
+        words = words[:-1]
+    # ask how old are you → age
+    if len(words) == 1 and words[0].lower() == "old":
+        return "age", ["old"]
     if not words:
         return None, []
     subject = words
-    if not subject:
-        return None, []
     raw_phrase = " ".join(subject)
+
+    def _plain_alias(word):
+        if word[:1].isascii() and word.isascii():
+            return word.lower()
+        return word if nk(word).startswith("ال") else "ال" + key(word)
 
     # كلمة واحدة تبقى متوافقة مع الضاد القديمة: «عمرك» -> «العمر»، «اسمك» -> «الاسم».
     if len(subject) == 1:
         w = subject[0]
+        if w[:1].isascii() and re.match(r"[A-Za-z]", w):
+            phrase = w.lower()
+            aliases = [raw_phrase] if raw_phrase.lower() != phrase else []
+            return phrase, aliases
         phrase = w if nk(w).startswith("ال") else "ال" + key(w)
         aliases = [raw_phrase] if nk(raw_phrase) != nk(phrase) else []
         return phrase, aliases
@@ -763,53 +1244,108 @@ def _implicit_value_name(q: str):
     # «عدد البيض في السلة» و«عدد البيض في الثلاجة».
     # لكن نضيف الجزء قبل حرف الجر كاسم مختصر طبيعي إذا كان وحيدًا وغير ملتبس.
     context_preps = {nk(w) for w in ("في", "من", "على", "عن", "إلى", "الى", "عند", "لدى", "داخل", "وسط", "جنب", "فوق", "تحت", "بين", "مع")}
+    context_preps |= {"in", "on", "at", "from", "of", "to", "inside", "into"}
     for i, w in enumerate(subject):
-        if i >= 1 and nk(w) in context_preps:
+        if i >= 1 and (nk(w) in context_preps or w.lower() in context_preps):
             base = " ".join(subject[:i]).strip()
-            if base and nk(base) != nk(phrase):
+            # drop a trailing English article in the alias ("eggs")
+            if base.lower().endswith(" the"):
+                base = base[:-4].strip()
+            if base and nk(base) != nk(phrase) and base.lower() != phrase.lower():
                 aliases.append(base)
             break
 
     # توافق خلفي: الصيغ القديمة كانت تحفظ أول مفهوم فقط (السعر، البيض...).
     descriptors = {nk(w) for w in ("عدد", "كميه", "كمية", "مقدار", "قيمه", "قيمة", "حجم", "وزن")}
-    alias_word = subject[1] if len(subject) > 1 and nk(subject[0]) in descriptors else subject[0]
-    alias = alias_word if nk(alias_word).startswith("ال") else "ال" + key(alias_word)
-    if nk(alias) != nk(phrase) and all(nk(alias) != nk(a) for a in aliases):
+    descriptors |= {"number", "count", "amount", "quantity"}
+    alias_word = subject[1] if len(subject) > 1 and (nk(subject[0]) in descriptors or subject[0].lower() in descriptors) else subject[0]
+    alias = _plain_alias(alias_word)
+    if nk(alias) != nk(phrase) and alias.lower() != phrase.lower() and all(nk(alias) != nk(a) for a in aliases):
         aliases.append(alias)
     return phrase, aliases
+
+
+_SAVE_IN_RE = re.compile(
+    r"""^(?P<head>.+?)\s*(?:,|،)?\s+
+        (?:
+            (?:و\s*)?(?:احفظ(?:ه|ها)?|حفظ(?:ه|ها)?|خله|حطه)\s+في
+          | and\s+(?:save|store)(?:\s+it)?\s+in
+        )
+        \s*(?P<var>.*)$
+    """,
+    re.I | re.X,
+)
+_INCOMPLETE_SAVE_RE = re.compile(
+    r"""^(?P<head>.+?)\s+
+        (?:
+            و\s*(?:احفظ(?:ه|ها)?|حفظ(?:ه|ها)?|خله|حطه)(?:\s+في)?
+          | and\s+(?:save|store)(?:\s+it)?(?:\s+in)?
+        )
+        \s*$
+    """,
+    re.I | re.X,
+)
+
+
+def _ask_save_suggestion(question):
+    phrase, _aliases = _implicit_value_name(question)
+    dest = phrase or "الاسم"
+    if dest[:1].isascii():
+        return f"اسأل {question} واحفظه في {dest}", dest
+    return f"اسأل {question} واحفظه في {dest}", dest
 
 
 def parse_ask(text, names: Names):
     t = text.strip()
     if not t:
         raise DadError("«اسأل» تحتاج السؤال؛ مثل: اسأل كم العدد.")
-    m = re.match(r"^(.+?)\s+واحفظ\s+في\s+(.+?)\s*$", t)
-    if not m:
-        old = re.match(r"^(.+?)\s+في\s+([^\W\d]\w*)\s*$", t)
+    m = _SAVE_IN_RE.match(t)
+    if m:
+        q, explicit_var = m.group("head").strip(), (m.group("var") or "").strip()
+        if not explicit_var:
+            sug, dest = _ask_save_suggestion(q)
+            raise DadError(
+                f"أبي أحفظ الجواب، بس ما قلت في أي اسم. أكمل: واحفظه في {dest}.",
+                [sug],
+            )
+    else:
+        inc = _INCOMPLETE_SAVE_RE.match(t)
+        if inc:
+            q = inc.group("head").strip()
+            sug, dest = _ask_save_suggestion(q)
+            raise DadError(
+                f"أبي أحفظ الجواب، بس ما قلت في أي اسم. أكمل: واحفظه في {dest}.",
+                [sug],
+            )
+        old = re.match(rf"^(.+?)\s+في\s+({IDENT_PY})\s*$", t)
         if old:
             words = [w for w in tokens(old.group(1)) if nk(w) not in QUESTION_WORDS]
             # Compatibility: a repeated subject is an explicit destination.
             # A place such as «السلة» stays part of the question and its name.
             if (words and key(words[0]) == key(old.group(2))) or old.group(1)[:1] in "\"'«":
                 m = old
-    if m:
-        q, explicit_var = m.group(1).strip(), m.group(2)
-    else:
-        q, explicit_var = t, None
+        if m:
+            q, explicit_var = m.group(1).strip(), m.group(2)
+        else:
+            q, explicit_var = t, None
     q = q.strip()
+    kind = _now_kind(q)
+    if kind:
+        return {"op": "OUTPUT", "expr": f"_dad_now({kind!r})"}
     if len(tokens(q)) == 1 and q[:1] in "\"'«":
         q = _quoted_value(q)
     tk = [w for w in tokens(q) if re.match(r"[^\W\d_]", w)]
     if explicit_var is None:
         phrase, aliases = _implicit_value_name(q)
         if not phrase:
-            raise DadError(f"ما عرفت وين أحفظ جواب «{q}». اكتب: اسأل({q} في الاسم)")
+            raise DadError(f"ما عرفت وين أحفظ جواب «{q}». اكتب: اسأل({q} في الاسم)",
+                           [f"اسأل {q} واحفظه في الاسم"] if q else ["اسأل شنو اسمك واحفظه في الاسم"])
         _check_user_name(phrase)
         var = names.add(phrase, aliases=aliases)
     else:
         _check_user_name(explicit_var)
         var = names.add(explicit_var)
-    numeric = bool(tk) and nk(tk[0]) == "كم"
+    numeric = bool(tk) and (nk(tk[0]) == "كم" or (tk[0].lower() == "how" and len(tk) > 1 and tk[1].lower() in ("many", "much")))
     prompt = q if re.search(r"[؟?]\s*$", q) else q + "؟"
     node = {"op": "INPUT", "var": var, "prompt": prompt, "numeric": numeric}
     return node
@@ -822,6 +1358,7 @@ COMPARATORS = [  # (كلمات موحدة، رمز) — الأطول أول
     (("اكبر", "من"), ">"), (("اكثر", "من"), ">"), (("فوق",), ">"),
     (("اصغر", "من"), "<"), (("اقل", "من"), "<"), (("تحت",), "<"),
     (("يساوي",), "=="), (("هو",), "=="), (("هي",), "=="),
+    (("gte",), ">="), (("lte",), "<="), (("gt",), ">"), (("lt",), "<"), (("eq",), "=="), (("ne",), "!="),
     ((">=",), ">="), (("<=",), "<="), (("!=",), "!="), (("==",), "=="), (("=",), "=="), ((">",), ">"), (("<",), "<"),
 ]
 
@@ -866,9 +1403,9 @@ def parse_cond(text, names: Names):
             tk = tk[1:-1]
             if not tk:
                 raise DadError("الشرط ناقص داخل الأقواس.")
-        norm = [nk(t) for t in tk]
+        norm = [(nk(t).lower() if nk(t).isascii() else nk(t)) for t in tk]
 
-        for join, symbol in (("او", "or"), ("و", "and")):
+        for join, symbol in (("او", "or"), ("و", "and"), ("or", "or"), ("and", "and")):
             depth = 0
             for i, token in enumerate(tk):
                 if token == "(":
@@ -920,6 +1457,16 @@ def parse_cond(text, names: Names):
             )
         if first_error is not None:
             raise first_error
+        # طالما صح / إذا تم — شرط بدون مقارنة
+        if len(tk) == 1:
+            truth = {nk("صح"): "True", nk("خطأ"): "False", "true": "True", "false": "False",
+                     "True": "True", "False": "False"}
+            if nk(tk[0]) in truth or tk[0] in truth:
+                return truth.get(nk(tk[0]), truth.get(tk[0], tk[0]))
+            try:
+                return _operand(tk, names, "left")
+            except DadError:
+                pass
         raise DadError(f"ما لقيت مقارنة في «{' '.join(tk)}». استخدم أكبر من أو أصغر من أو يساوي.")
     return {"op":"IF", "cond":condition(tokens(text.strip().rstrip(":")))}
 
@@ -940,14 +1487,31 @@ COLORS = {nk(k): v for k, v in [("احمر", "#D84A3A"), ("حمراء", "#D84A3A
           ("اخضر", "#3A9D5D"), ("خضراء", "#3A9D5D"), ("اصفر", "#F2C230"), ("صفراء", "#F2C230"), ("ابيض", "#F5F5F0"),
           ("بيضاء", "#F5F5F0"), ("اسود", "#2A2A2A"), ("سوداء", "#2A2A2A"), ("برتقالي", "#EE8A2C"), ("برتقاليه", "#EE8A2C"),
           ("بنفسجي", "#7E5BC4"), ("بنفسجيه", "#7E5BC4"), ("وردي", "#E07BA8"), ("ورديه", "#E07BA8"), ("بني", "#8A5A36"),
-          ("بنيه", "#8A5A36"), ("رمادي", "#8E959C"), ("رماديه", "#8E959C")]}
+          ("بنيه", "#8A5A36"), ("رمادي", "#8E959C"), ("رماديه", "#8E959C"),
+          ("red", "#D84A3A"), ("blue", "#2F6FD0"), ("green", "#3A9D5D"), ("yellow", "#F2C230"),
+          ("white", "#F5F5F0"), ("black", "#2A2A2A"), ("orange", "#EE8A2C"), ("purple", "#7E5BC4"),
+          ("pink", "#E07BA8"), ("brown", "#8A5A36"), ("gray", "#8E959C"), ("grey", "#8E959C")]}
+COLORS.update({k.lower(): v for k, v in list(COLORS.items()) if isinstance(k, str) and k.isascii()})
 OBJECTS = {}
+SHAPE_TYPES = {"circle", "square", "rect", "triangle", "line"}
 for _names, _obj in [(("سفينه", "سفينة", "سفين", "سفن", "قارب", "مركب", "بوم", "لنج"), "ship"), (("بحر", "البحر", "موج", "شاطئ"), "sea"),
                      (("شمس", "الشمس"), "sun"), (("قمر", "القمر"), "moon"), (("نجوم", "نجمه", "نجوم"), "stars"),
                      (("بيت", "منزل", "بيوت"), "house"), (("شجره", "شجرة", "اشجار", "شجر"), "tree"), (("نخله", "نخلة", "نخيل"), "palm"),
                      (("جبل", "جبال"), "mountain"), (("غيمه", "غيوم", "سحاب", "سحابه"), "cloud"), (("ليل", "بالليل", "الليل"), "night")]:
     for _n in _names:
         OBJECTS[key(_n)] = _obj
+for _names, _obj in [
+    (("دائره", "دائرة", "دايره", "circle"), "circle"),
+    (("مربع", "square", "box"), "square"),
+    (("مستطيل", "rectangle", "rect"), "rect"),
+    (("مثلث", "triangle"), "triangle"),
+    (("خط", "line"), "line"),
+]:
+    for _n in _names:
+        OBJECTS[key(_n)] = _obj
+        OBJECTS[nk(_n)] = _obj
+        if str(_n).isascii():
+            OBJECTS[_n.lower()] = _obj
 POS = {nk("يمين"): 0.78, nk("اليمين"): 0.78, nk("يسار"): 0.22, nk("اليسار"): 0.22, nk("الوسط"): 0.5, nk("وسط"): 0.5, nk("النص"): 0.5}
 DEFAULT_X = {"ship": 0.5, "house": 0.3, "tree": 0.62, "palm": 0.86, "mountain": 0.5, "cloud": 0.3, "sun": 0.82, "moon": 0.8}
 NAME_RE = re.compile(r"(?:و?اسمه?ا?|و?اسمها|مكتوب عليه?ا?)\s+(.+?)(?:\s+(?:و|في|على)\s|$)")
@@ -962,21 +1526,50 @@ def parse_draw(text):
     if m:
         label = m.group(1).strip(" «»\"")
         raw = raw[: m.start()] + " " + raw[m.end():]
-    objs, unknown, last = [], [], None
+    objs, unknown, last, pending_color, pending_x = [], [], None, None, None
+    skip = {nk(x) for x in ("في", "على", "فوق", "تحت", "و", "مع", "جنب", "عند", "كبيره", "كبير", "صغيره", "صغير",
+                            "لونها", "لونه", "لون", "بلون", "داخل", "a", "an", "the", "of", "with", "color",
+                            "coloured", "colored", "and", "then")}
+    skip |= {s.lower() for s in skip if isinstance(s, str)}
+    skip |= {"and", "then"}
     for w in tokens(raw):
-        k = key(w.lstrip("و") if w.startswith("و") and len(w) > 2 and key(w[1:]) in OBJECTS else w)
-        n = nk(w.lstrip("و")) if w.startswith("و") and len(w) > 2 else nk(w)
+        bare = w
+        # Strip a leading conjunction «و» only when the rest is a known word
+        # (ومربع). Do not use lstrip — «وردي» starts with و as part of the color.
+        if w.startswith("و") and len(w) > 2:
+            rest = w[1:]
+            if (key(rest) in OBJECTS or nk(rest) in OBJECTS or rest.lower() in OBJECTS
+                    or nk(rest) in COLORS or rest.lower() in COLORS
+                    or nk(rest) in POS or nk(rest) in skip):
+                bare = rest
+        k = key(bare) if key(bare) in OBJECTS else (nk(bare) if nk(bare) in OBJECTS else (bare.lower() if bare.lower() in OBJECTS else key(w)))
+        n = nk(bare)
+        n_en = bare.lower()
         if k in OBJECTS:
-            last = {"type": OBJECTS[k], "color": None, "x": None}; objs.append(last); continue
-        if n in COLORS and last:
-            last["color"] = COLORS[n]; continue
-        if n in POS and last:
-            last["x"] = POS[n]; continue
-        if re.match(r"[^\W\d_]", w) and n not in {nk(x) for x in ("في", "على", "فوق", "تحت", "و", "مع", "جنب", "عند", "كبيره", "كبير", "صغيره", "صغير", "لونها", "لونه", "داخل")}:
-            unknown.append(w)
+            last = {"type": OBJECTS[k], "color": pending_color, "x": pending_x}
+            objs.append(last)
+            pending_color = pending_x = None
+            continue
+        if n in COLORS or n_en in COLORS:
+            col = COLORS.get(n) or COLORS[n_en]
+            if last:
+                last["color"] = col
+            else:
+                pending_color = col
+            continue
+        if n in POS:
+            if last:
+                last["x"] = POS[n]
+            else:
+                pending_x = POS[n]
+            continue
+        if w[:1].isalpha() or (len(w) and not w[:1].isdigit() and w not in "،,."):
+            if n not in skip and n_en not in skip and re.match(r"[^\W\d_]", w):
+                unknown.append(w)
     kinds = {o["type"] for o in objs}
     if not objs:
-        raise DadError(f"ما أعرف أرسم «{text.strip()}» بالأشكال الثابتة. جرّب سفينة أو بيتًا أو شجرة.")
+        raise DadError(f"ما أعرف أرسم «{text.strip()}». جرّب: ارسم دائرة حمراء، ارسم مربع أزرق، أو ارسم سفينة في البحر.")
+
     stop = {nk(x) for x in ("مشهد", "صوره", "صورة", "رسمه", "رسمة", "حلو", "حلوه", "جميل", "جميله", "كبير", "كبيره", "صغير", "صغيره",
                             "ملون", "ملونه", "واحد", "واحده", "لي", "لنا", "هادي", "هاديه", "وسط", "اليمين", "اليسار", "يمين", "يسار", "النص")}
     unknown = [w for w in unknown if nk(w) not in stop and nk(w.lstrip("و")) not in stop and not read_number([w], 0)]
@@ -986,7 +1579,39 @@ def parse_draw(text):
             "sea": "sea" in kinds, "unknown": unknown, "text": text.strip()}
 
 
+def _shapes_svg(ast, W=640, H=360):
+    """A clean board for beginner shapes: circle, square, rect, triangle, line."""
+    s = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}">',
+         f'<rect width="{W}" height="{H}" rx="18" fill="#F4F1EA"/>',
+         '<rect x="16" y="16" width="608" height="328" rx="12" fill="#FFFDF8" stroke="#E6DFD2"/>']
+    objs = [o for o in ast["objects"] if o["type"] in SHAPE_TYPES]
+    n = max(1, len(objs))
+    for i, o in enumerate(objs):
+        c = o.get("color") or "#2F6FD0"
+        x = int(W * (o["x"] if o.get("x") is not None else (i + 1) / (n + 1)))
+        y = H // 2
+        typ = o["type"]
+        if typ == "circle":
+            s.append(f'<circle cx="{x}" cy="{y}" r="62" fill="{c}"/>')
+        elif typ == "square":
+            s.append(f'<rect x="{x - 58}" y="{y - 58}" width="116" height="116" rx="10" fill="{c}"/>')
+        elif typ == "rect":
+            s.append(f'<rect x="{x - 90}" y="{y - 48}" width="180" height="96" rx="12" fill="{c}"/>')
+        elif typ == "triangle":
+            s.append(f'<path d="M{x} {y - 70} L{x + 78} {y + 62} L{x - 78} {y + 62} Z" fill="{c}"/>')
+        elif typ == "line":
+            s.append(f'<line x1="{x - 90}" y1="{y}" x2="{x + 90}" y2="{y}" stroke="{c}" stroke-width="14" stroke-linecap="round"/>')
+    if ast.get("label"):
+        lbl = ast["label"].replace("&", "&amp;").replace("<", "&lt;")
+        s.append(f'<text x="{W // 2}" y="{H - 22}" text-anchor="middle" font-family="Tahoma, Segoe UI, sans-serif" font-size="22" fill="#333" direction="rtl">{lbl}</text>')
+    s.append("</svg>")
+    return "".join(s)
+
+
 def scene_svg(ast):
+    if ast.get("objects") and all(o["type"] in SHAPE_TYPES for o in ast["objects"] if o["type"] != "sea"):
+        if not ast.get("sea") and not ast.get("night"):
+            return _shapes_svg(ast)
     W, H = 640, 400
     night, sea = ast["night"], ast["sea"]
     horizon = 250 if sea else 300
@@ -1060,7 +1685,7 @@ def _destination(text, words):
 
 
 def parse_add(text, names: Names):
-    m = _destination(text.strip(), ('إلى', 'الى', 'ل', 'على'))
+    m = _destination(text.strip(), ('إلى', 'الى', 'ل', 'على', 'to'))
     if not m:
         raise DadError(f"ما فهمت وش أضيف ووين في «{text.strip()}». مثل: أضف تفاح إلى السلة")
     what, target = m
@@ -1079,8 +1704,48 @@ def parse_open(text):
     return {"op": "READ", "path": m.group(1)}
 
 
+def parse_dict(text, names: Names):
+    name = text.strip()
+    if not name:
+        raise DadError("بعد «قاموس» / «dict» اكتب اسم المتغير، مثل: قاموس بيانات")
+    _check_user_name(name)
+    return {"op": "DICT_NEW", "var": names.add(name)}
+
+
+def parse_put(text, names: Names):
+    m = re.match(
+        rf"^(.+?)\s+(?:في|in)\s+({IDENT_PY})\s+(?:بقيمة|as|=)\s+(.+)$",
+        text.strip(),
+        re.I,
+    )
+    if not m:
+        raise DadError("مثل: ضع «اسم» في البيانات بقيمة «علي»  أو  put \"name\" in data as \"Ali\"")
+    key_src, target, val_src = m.group(1).strip(), m.group(2), m.group(3).strip()
+    found = names.find(target)
+    if not found:
+        raise DadError(f"ما أعرف «{target}». سوّه أول كقاموس:", [f"قاموس {target}", f"dict {target}"])
+    key_ast = parse_output(key_src, names)
+    val_ast = parse_output(val_src, names)
+    if key_ast["op"] != "OUTPUT" or val_ast["op"] != "OUTPUT":
+        raise DadError("«ضع» تحتاج مفتاحاً وقيمة جاهزين.")
+    return {"op": "PUT", "target": found, "key": key_ast["expr"], "expr": val_ast["expr"]}
+
+
+def parse_append(text, names: Names):
+    m = _destination(text.strip(), ('في', 'إلى', 'الى', 'to', 'in'))
+    if not m:
+        raise DadError(f"ما فهمت وش ألحق ووين في «{text.strip()}». مثل: ألحق الناتج في سجل.txt")
+    src, dest = m
+    value = parse_output(src, names)
+    if value["op"] != "OUTPUT":
+        raise DadError("«ألحق» تحتاج قيمة جاهزة.")
+    path = re.sub(r"^ملف\s+", "", dest).strip().strip("\"'«»")
+    return {"op": "APPEND", "expr": value["expr"], "path": path}
+
+
 def parse_save(text, names: Names):
-    m = _destination(text.strip(), ('في',))
+
+    m = _destination(text.strip(), ('في', 'in', 'into'))
     if not m:
         raise DadError(f"ما فهمت وش أحفظ ووين في «{text.strip()}». مثل: احفظ(الناتج في نتيجة.txt)")
     src, dest = m
@@ -1106,18 +1771,19 @@ def parse_save(text, names: Names):
     return {"op": "SAVE_VAR", "var": names.add(dest), "expr": what}
 
 
-TIMES_RE = re.compile(r"^(.*?)\s*(\S+(?:\s+\S+)?)\s+(?:مرات|مره|مرة|مرّات)\s*(.*)$")
+TIMES_RE = re.compile(r"^(.*?)\s*(\S+(?:\s+\S+)?)\s+(?:مرات|مره|مرة|مرّات|times)\s*(.*)$", re.I)
 
 
 def parse_repeat(text, names: Names):
     t = text.strip()
-    if re.match(r"^-\s*\d+(?:\.\d+)?\s*(?:مرات|مرة|مره)?$", t.translate(AR_DIGITS)):
+    if re.match(r"^-\s*\d+(?:\.\d+)?\s*(?:مرات|مرة|مره|times)?$", t.translate(AR_DIGITS), re.I):
         raise DadError("عدد مرات «كرر» لا يجوز أن يكون سالبًا.")
-    t = re.sub(r"(?<!\S)مرتين(?!\S)", "2 مرات", t)
+    t = re.sub(r"(?<!\S)(?:مرتين|twice)(?!\S)", "2 مرات", t, flags=re.I)
     t = re.sub(r"^(?:مرة|مره)(?:\s+(?:وحدة|وحده|واحدة|واحده))?$", "1 مرات", t)
+    t = re.sub(r"(?i)^(?:once)$", "1 مرات", t)
     # كلام طبيعي شائع: «كرر اسأل ... مرتين» = مرتان بالضبط.
     # نفصله قبل TIMES_RE لأن «مرتين» كلمة واحدة وما فيها رقم مستقل.
-    m2 = re.match(r"^(.*?)\s+مرتين\s*$", t)
+    m2 = re.match(r"^(.*?)\s+(?:مرتين|twice)\s*$", t, re.I)
     if m2:
         count, rest = 2, m2.group(1).strip()
         inner = None
@@ -1167,9 +1833,10 @@ def parse_repeat(text, names: Names):
 
 
 # ============================================================================ الدوال الطبيعية — 1.8
-_DEFINE_RE = re.compile(r"^(?:عرّف|عرف)\s+(?:دالة\s+)?(?:اسمها\s+)?([^\W\d]\w*)\s*(.*?)\s*:?\s*$")
-_DEFINE_RET_RE = re.compile(r"\s+(?:و?يرجع|و?ترجع|و?أرجع|و?ارجع)\s+(.+)$")
-_DEFINE_TAKES_RE = re.compile(r"^(?:ياخذ|يأخذ|ياخد|يأخد|يستقبل|مدخلاته?|معاملاته?)\s+(.+)$")
+_DEFINE_RE = re.compile(rf"^(?:عرّف|عرف)\s+(?:دالة\s+)?(?:اسمها\s+)?({IDENT_PY})\s*(.*?)\s*:?\s*$")
+_DEFINE_RE_EN = re.compile(rf"^def\s+({IDENT_PY})\s+(takes\b.*?)\s*:?\s*$", re.I)
+_DEFINE_RET_RE = re.compile(r"\s+(?:و?يرجع|و?ترجع|و?أرجع|و?ارجع|(?:and\s+)?returns?)\s+(.+)$", re.I)
+_DEFINE_TAKES_RE = re.compile(r"^(?:ياخذ|يأخذ|ياخد|يأخد|يستقبل|مدخلاته?|معاملاته?|takes)\s+(.+)$", re.I)
 _DEFINE_NONE_RE = re.compile(r"^(?:بدون\s+(?:مدخلات|معاملات|قيم)|ما\s+ياخذ\s+شي|ما\s+يأخذ\s+شي)\s*$")
 
 
@@ -1194,10 +1861,10 @@ def _define_params(text):
     raw = m.group(1).strip()
     raw = re.sub(r"^(?:متغيرات?|قيم|مدخلات)\s+", "", raw)
     # الفاصلة أو «و» بين الأسماء. ما نفصل الواو الملصوقة داخل الاسم.
-    parts = [x.strip() for x in re.split(r"\s*(?:،|,)\s*|\s+و\s+", raw) if x.strip()]
+    parts = [x.strip() for x in re.split(r"\s*(?:،|,)\s*|\s+و\s+|\s+and\s+", raw) if x.strip()]
     if not parts:
         raise DadError("ما لقيت أسماء المدخلات بعد «ياخذ».")
-    bad = [x for x in parts if not re.fullmatch(r"[^\W\d]\w*", x)]
+    bad = [x for x in parts if not re.fullmatch(rf"{IDENT_PY}", x)]
     if bad:
         raise DadError(f"اسم المدخل لازم يكون كلمة وحدة. ما فهمت: «{bad[0]}»")
     if len(set(parts)) != len(parts):
@@ -1208,7 +1875,7 @@ def _define_params(text):
 def parse_define(text, names: Names):
     """عرّف ضعف ياخذ س [ويرجع س ضرب 2] ← def ضعف(س): ..."""
     t = text.strip()
-    m = _DEFINE_RE.match(t)
+    m = _DEFINE_RE.match(t) or _DEFINE_RE_EN.match(t)
     if not m:
         return None
     name, rest = m.group(1), m.group(2).strip()
@@ -1240,23 +1907,43 @@ for _w, _c in [("قل", "OUT"), ("قول", "OUT"), ("اطبع", "OUT"), ("اعر
                ("احسب", "CALC"), ("احسبلي", "CALC"), ("أكمل", "CONTINUE"), ("اكمل", "CONTINUE"), ("كمل", "CONTINUE"),
                ("ارسم", "DRAW"), ("رسم", "DRAW"), ("ارسملي", "DRAW"),
                ("إذا", "IF"), ("اذا", "IF"), ("لو", "IF"), ("وإلا إذا", "ELIF"), ("والا اذا", "ELIF"), ("كرر", "REPEAT"),
+               ("طالما", "WHILE"),
                ("افتح", "OPEN"), ("احفظ", "SAVE"), ("أضف", "ADD"), ("اضف", "ADD"), ("ضيف", "ADD"),
-               ("اطلب", "AI"), ("أطلب", "AI"), ("حلل", "EXPLAIN"), ("حللي", "EXPLAIN"), ("اشرح", "EXPLAIN")]:
+               ("اطلب", "AI"), ("أطلب", "AI"), ("حلل", "EXPLAIN"), ("حللي", "EXPLAIN"), ("اشرح", "EXPLAIN"),
+               # Natural English aliases (proposed Novaq table). Not iter: dictionary كرر = iter.
+               # Do not add if/for/def/else/print/open/while/class — those already work as Python.
+               ("say", "OUT"), ("show", "OUT"),
+               ("ask", "ASK"),
+               ("calc", "CALC"),
+               ("more", "CONTINUE"),
+               ("draw", "DRAW"),
+               ("rep", "REPEAT"),
+               ("save", "SAVE"), ("write", "SAVE"),
+               ("add", "ADD"),
+               ("ai", "AI"),
+               ("explain", "EXPLAIN"),
+               ("read", "OPEN"), ("اقرأ", "OPEN"),
+               ("append", "APPEND"), ("ألحق", "APPEND"), ("الحق", "APPEND"),
+               ("dict", "DICT"), ("قاموس", "DICT"),
+               ("put", "PUT"), ("ضع", "PUT"),
+               ]:
     COMMANDS[nk(_w)] = _c
 
 # أسماء محجوزة لا يجوز للمستخدم أن يحولها إلى متغيرات عادية.
 # هذا يمنع كسر معنى اللغة مثل: الناتج = 5 أو ثم = 3.
 RESERVED_NAMES = {nk(w) for w in (
     "قل", "قول", "اطبع", "اعرض", "اسأل", "اسال", "احسب", "احسبلي",
-    "كمل", "أكمل", "اكمل", "كرر", "إذا", "اذا", "وإلا", "والا", "لكل", "ثم", "كم",
+    "كمل", "أكمل", "اكمل", "كرر", "إذا", "اذا", "وإلا", "والا", "لكل", "ثم", "كم", "طالما", "صنف", "دالة",
     "ارسم", "افتح", "احفظ", "أضف", "اضف", "اطلب", "حلل",
-    "الناتج", "الرد", "المحتوى"
+    "الناتج", "الرد", "المحتوى",
+    "say", "show", "ask", "calc", "more", "rep", "then", "result",
+    "draw", "save", "add", "ai", "explain", "times",
 )}
 
 def _check_user_name(name):
     raw = " ".join(str(name).split())
     if nk(raw) in RESERVED_NAMES or (len(raw.split()) == 1 and key(raw) in {key(w) for w in RESERVED_NAMES}):
-        raise DadError(f"«{name}» اسم محجوز في لغة الضاد — اختر اسم ثاني للمتغير.")
+        raise DadError(f"«{name}» اسم محجوز في لغة نوفاك — اختر اسم ثاني للمتغير.")
     parts = tokens(raw)
     valid = bool(parts) and _name_token_ok(parts[0], first=True) and all(
         _name_token_ok(t, first=(i == 0)) for i, t in enumerate(parts)
@@ -1267,6 +1954,23 @@ def _check_user_name(name):
 _SK = str.maketrans({"ب": "ٮ", "ت": "ٮ", "ث": "ٮ", "ن": "ٮ", "ي": "ٮ", "ج": "ح", "خ": "ح", "ذ": "د", "ز": "ر",
                      "ش": "س", "ض": "ص", "ظ": "ط", "غ": "ع", "ق": "ڡ", "ف": "ڡ"})
 _CMD_SK = {nk(k).translate(_SK): c for k, c in COMMANDS.items()}
+
+# كلمات الطبقة القديمة (مثل صنف) ليست أوامر طبيعية — لا تُصحَّح لأمر بالشكل العظمي.
+# «صنف» و«ضيف» لهما نفس الهيكل (ص/ض + ن/ي + ف) فبدون الحماية تتحول «صنف» إلى أضف.
+_PROTECTED_WORDS = {nk(w) for w in (
+    "صنف", "دالة", "طالما", "لكل", "حاول", "عند_خطأ", "أخيرا", "أرجع", "ارجع",
+    "استورد", "باسم", "ارفع", "تجاوز", "اكسر", "لاشيء", "نفسه", "طول", "مدى",
+    "صحيح", "عشري", "نص", "قائمة", "قاموس", "مجموعة", "صف",
+    "العرض", "الطلب", "نصف", "النصف", "ربع", "الربع", "ثلث", "الثلث",
+    "المحتوى", "عند_نجاح",
+)}
+
+
+def _typo_article_clash(written, command):
+    """العرض is not اعرض; الطلب is not اطلب."""
+    if written.startswith("ال") and not command.startswith("ال"):
+        return True
+    return False
 
 
 def _edit1(a, b):
@@ -1289,23 +1993,31 @@ def _edit1(a, b):
                 return False
     return True
 
-def _cmd_of(word):
+def _cmd_of(word, typo=True):
     """يتحمل اختلاف النقاط وخطأ كتابة واحد في الأمر، بدون تخمين الكلمات العادية."""
     k = nk(word)
-    exact = COMMANDS.get(k) or _CMD_SK.get(k.translate(_SK))
+    if k in _PROTECTED_WORDS and k not in COMMANDS:
+        return None
+    exact = COMMANDS.get(k) or (COMMANDS.get(k.lower()) if k.isascii() else None)
     if exact:
         return exact
+    if k.isascii():
+        return None  # no typo repair for English (call must not become calc)
+    sk = _CMD_SK.get(k.translate(_SK))
+    if sk:
+        return sk
     # لا نصحح الكلمات القصيرة جداً لأنها قد تكون كلاماً عادياً.
-    if len(k) < 4:
+    if not typo or len(k) < 4:
         return None
-    matches = {c for w, c in COMMANDS.items() if len(w) >= 4 and _edit1(k, w)}
+    # قول/كرر are 3 letters; a 4-letter typo like قوول should still match at a command spot.
+    matches = {c for w, c in COMMANDS.items() if len(w) >= 3 and _edit1(k, w) and not _typo_article_clash(k, w)}
     return next(iter(matches)) if len(matches) == 1 else None
 
 
-CALL_RE = re.compile(r"^\s*(وإلا إذا|والا اذا|[^\W\d_]+)\s*\((.*)\)\s*(:?)\s*$")
+CALL_RE = re.compile(rf"^\s*(وإلا إذا|والا اذا|{IDENT_CORE})\s*\((.*)\)\s*(:?)\s*$")
 
 
-LOOSE_OK = {"OUT", "ASK", "CALC", "CONTINUE", "DRAW", "SAVE", "OPEN", "ADD", "AI", "EXPLAIN"}   # إذا/كرر بدون أقواس = صيغة الضاد القديمة
+LOOSE_OK = {"OUT", "ASK", "CALC", "CONTINUE", "DRAW", "SAVE", "OPEN", "ADD", "AI", "EXPLAIN", "DICT", "PUT", "APPEND"}   # إذا/كرر بدون أقواس = صيغة الضاد القديمة
 
 
 def _cmd_words(text):
@@ -1314,7 +2026,7 @@ def _cmd_words(text):
     visible = {i for i, _ch, depth in spans(text) if depth == 0}
     text_end = len(text.rstrip())
     text_start = len(text) - len(text.lstrip())
-    for m in re.finditer(r'[^\W\d_][\w]*', text):
+    for m in re.finditer(IDENT_CORE, text):
         w = m.group(0)
         if m.start() not in visible:
             continue
@@ -1323,8 +2035,7 @@ def _cmd_words(text):
         if m.start() == text_start or m.end() == text_end:
             c = _cmd_of(w)
         else:
-            k = nk(w)
-            c = COMMANDS.get(k) or _CMD_SK.get(k.translate(_SK))
+            c = _cmd_of(w, typo=False)
         if c in LOOSE_OK:
             hits.append((m.start(), m.end(), w, c))
     return hits
@@ -1413,15 +2124,17 @@ def parse_statement(text, names: Names, loose=False):
         if not one_group(text[text.index('('):]):
             raise DadError('فيه أكثر من أمر في السطر؛ حط بينهم «ثم».')
         outside = _outside_quotes(body)
-        call_words = re.findall(r"([^\W\d_]\w*)\s*\(", outside)
+        call_words = re.findall(rf"({IDENT_CORE})\s*\(", outside)
         nested_call = any(w in names.functions or nk(w) in {nk(x) for x in ('صحيح', 'عشري', 'نص', 'مدى', 'طول', 'مجموع', 'أكبر', 'أصغر', 'قرّب')} for w in call_words)
         nested_call = nested_call or bool(re.search(r'\w+(?:\.\w+)+\s*\(', outside))
         has_struct = re.search(r"[\[{]", outside)
         has_paren = "(" in outside or ")" in outside
         # الأقواس الحسابية للتجميع جزء رسمي من «احسب»: (2 + 3) × 4.
         # استدعاء دالة مثل ضعف(5)، والقوائم/القواميس، تظل للمسار القديم.
-        legacy_nested = (has_struct and cmd not in ('SAVE', 'OUT')) or (nested_call and cmd not in ('SAVE', 'CONTINUE', 'IF', 'ELIF'))
-        if nk(m.group(1)) == "اطبع" or (legacy_nested and cmd not in ("EXPLAIN", "AI")):
+        legacy_nested = (has_struct and cmd not in ('SAVE', 'OUT', 'CALC')) or (nested_call and cmd not in ('SAVE', 'CONTINUE', 'IF', 'ELIF', 'WHILE', 'CALC'))
+        # «اطبع» مثل «قول»: المسار الطبيعي يفهم «اطبع هلا» و«اطبع «هلا»».
+        # الاستدعاءات المتداخلة/القوائم تظل للمسار القديم.
+        if legacy_nested and cmd not in ("EXPLAIN", "AI"):
             return None                                        # صيغة الضاد القديمة / Python — تمشي في المسار القديم
     elif loose:
         w = text.strip().split(None, 1)
@@ -1434,21 +2147,21 @@ def parse_statement(text, names: Names, loose=False):
         label = {'OUT': 'قول', 'ASK': 'اسأل', 'CALC': 'احسب'}[cmd]
         ambiguity = _command_ambiguity(label + ' ' + body)
         if ambiguity:
-            raise DadError(ambiguity)
+            raise ambiguity if isinstance(ambiguity, DadError) else DadError(ambiguity)
     if cmd == "OUT":
         return parse_output(body, names)
     if cmd == "ASK":
         return parse_ask(body, names)
     if cmd == "CALC":
         if not body.strip():
-            names.add("الناتج"); return {"op": "CALC_ASK"}         # «احسب» لحالها ← تسأل وش تحسب
-        a = parse_calc(body, names); names.add("الناتج"); return a
+            names.add("الناتج", aliases=["result"]); return {"op": "CALC_ASK"}         # «احسب» لحالها ← تسأل وش تحسب
+        a = parse_calc(body, names); names.add("الناتج", aliases=["result"]); return a
     if cmd == "CONTINUE":
         if not body.strip():
             raise DadError("«أكمل» ناقصة — اكتب شنو تبي تكمل على القيمة السابقة.",
                            ["أكمل ناقص 4", "أكمل زائد 2", "أكمل ضرب 3"])
         # «أكمل» إذا نجحت تنتج «الناتج»، فنعرّفه الآن حتى يقدر الجزء التالي بنفس السطر يقول الناتج.
-        names.add("الناتج")
+        names.add("الناتج", aliases=["result"])
         # ما نفسر الحساب هنا؛ لازم نعرف الأمر السابق أولاً في expand.
         return {"op": "CONTINUE_RAW", "text": body.strip()}
     if cmd == "AI":
@@ -1457,7 +2170,7 @@ def parse_statement(text, names: Names, loose=False):
         return parse_explain(body, names)
     if cmd == "DRAW":
         return parse_draw(body)
-    if cmd in ("IF", "ELIF"):
+    if cmd in ("IF", "ELIF", "WHILE"):
         a = parse_cond(body, names); a["op"] = cmd; return a
     if cmd == "REPEAT":
         return parse_repeat(body, names)
@@ -1465,8 +2178,14 @@ def parse_statement(text, names: Names, loose=False):
         names.add("المحتوى"); return parse_open(body)
     if cmd == "SAVE":
         return parse_save(body, names)
+    if cmd == "APPEND":
+        return parse_append(body, names)
     if cmd == "ADD":
         return parse_add(body, names)
+    if cmd == "DICT":
+        return parse_dict(body, names)
+    if cmd == "PUT":
+        return parse_put(body, names)
     return None
 
 
@@ -1563,15 +2282,88 @@ def parse_explain(text, names: Names):
     return {"op": "EXPLAIN", "msg": msg}
 
 # ============================================================================ من AST إلى Python (سطر مقابل سطر)
+_STATIC_CALC_DENY = {
+    "eval", "exec", "compile", "__import__", "open", "input", "breakpoint",
+    "exit", "quit", "globals", "locals", "vars", "dir", "getattr", "setattr",
+    "delattr", "memoryview", "print",
+}
+
+
+class _ArithGuard(py_ast.NodeTransformer):
+    """Lower / and ** to checked helpers (correct errors, no try/lambda in codegen)."""
+    def visit_BinOp(self, node):
+        self.generic_visit(node)
+        helper = None
+        if isinstance(node.op, py_ast.Div):
+            helper = "_dad_div"
+        elif isinstance(node.op, py_ast.FloorDiv):
+            helper = "_dad_floordiv"
+        elif isinstance(node.op, py_ast.Mod):
+            helper = "_dad_mod"
+        elif isinstance(node.op, py_ast.Pow):
+            helper = "_dad_pow"
+        if helper:
+            return py_ast.Call(
+                func=py_ast.Name(id=helper, ctx=py_ast.Load()),
+                args=[node.left, node.right],
+                keywords=[],
+            )
+        return node
+
+
+def _lowered_calc_src(expr, continuing=False):
+    """Return a real Python expression, or None if the string must stay in evaluate()."""
+    src = expr
+    try:
+        tree = py_ast.parse(src, mode="eval")
+    except (SyntaxError, ValueError):
+        return None
+    for node in py_ast.walk(tree):
+        if isinstance(node, py_ast.Name) and node.id in _STATIC_CALC_DENY:
+            raise DadError("هذا الحساب يحتوي دالة غير مدعومة.")
+        if isinstance(node, py_ast.Attribute) and node.attr in _STATIC_CALC_DENY:
+            raise DadError("هذا الحساب يحتوي دالة غير مدعومة.")
+    if continuing or "القيمة_الفعالة" in src:
+        src = re.sub(r"(?<!\w)القيمة_الفعالة(?!\w)", "_dad_get_active(locals())", src)
+        try:
+            tree = py_ast.parse(src, mode="eval")
+        except (SyntaxError, ValueError):
+            return None
+    needs = any(
+        isinstance(n, py_ast.BinOp) and isinstance(n.op, (py_ast.Div, py_ast.FloorDiv, py_ast.Mod, py_ast.Pow))
+        for n in py_ast.walk(tree)
+    )
+    if needs:
+        tree = _ArithGuard().visit(tree)
+        py_ast.fix_missing_locations(tree)
+        src = py_ast.unparse(tree)
+    return src
+
+
+def _evaluate_fallback(expr, continuing=False):
+    flag = ", True" if continuing else ""
+    return f"_dad_evaluate({json.dumps(expr, ensure_ascii=False)}, globals(), locals(){flag})"
+
+
 def _evaluate_call(expr, continuing=False):
-    # Explicit value references preserve Python's closure binding while the
-    # arithmetic itself stays in the checked Aldad evaluator.
-    builtins = {'sum', 'max', 'min', '_dad_mean', '_dad_count', 'القيمة_الفعالة'}
-    references = sorted({n.id for n in py_ast.walk(py_ast.parse(expr, mode='eval')) if isinstance(n, py_ast.Name)} - builtins)
-    values = '{' + ', '.join(f'{json.dumps(n, ensure_ascii=False)}: {n}' for n in references) + '}'
-    scope = f'dict(locals(), **{values})' if references else 'locals()'
-    flag = ', True' if continuing else ''
-    return f'_dad_evaluate({json.dumps(expr, ensure_ascii=False)}, globals(), {scope}{flag})'
+    """Lower a static calc/return expression to real Python.
+
+    Interactive احسب (text typed at runtime) still uses evaluate().
+    No lambda: returns go through _dad_calc so dad2cpp can translate them.
+    """
+    src = _lowered_calc_src(expr, continuing)
+    if src is None:
+        return f"_dad_calc({_evaluate_fallback(expr, continuing)})"
+    return f"_dad_calc({src})"
+
+
+def _codegen_calc(expr, continuing=False):
+    """Assign الناتج/result/_dad_active from a static expression.
+
+    The expression is inlined (P1). Division/power go through checked
+    helpers, so we do not emit try/lambda (those break dad2cpp).
+    """
+    return f"الناتج = {_evaluate_call(expr, continuing)}; result = الناتج; _dad_active = الناتج"
 
 
 def codegen(a):
@@ -1588,9 +2380,15 @@ def codegen(a):
         targets = " = ".join([a["var"]] + [x for x in a.get("also", []) if _IDENT_RE.match(x)])
         return f"{targets} = _dad_ask({json.dumps(a['prompt'], ensure_ascii=False)}, {a['numeric']}); _dad_active = {a['var']}"
     if op == "CALC":
-        return f"الناتج = _dad_calc({_evaluate_call(a['expr'], bool(a.get('continued_from')))}); _dad_active = الناتج"
+        return _codegen_calc(a['expr'], bool(a.get('continued_from')))
     if op == "SAVE_VAR":
         return f"{a['var']} = {a['expr']}"
+    if op == "DICT_NEW":
+        return f"{a['var']} = {{}}"
+    if op == "PUT":
+        return f"{a['target']}[{a['key']}] = {a['expr']}"
+    if op == "APPEND":
+        return f"_dad_append({json.dumps(a['path'], ensure_ascii=False)}, {a['expr']})"
     if op == "DEFINE":
         head = f"def {a['name']}({', '.join(a.get('params', []))}):"
         return head + (f" return {a['return_expr']}" if a.get('return_expr') is not None else "")
@@ -1602,6 +2400,8 @@ def codegen(a):
         return f"if {a['cond']}:"
     if op == "ELIF":
         return f"elif {a['cond']}:"
+    if op == "WHILE":
+        return f"while {a['cond']}:"
     if op == "MEDIA":
         return f"_dad_media({json.dumps(a['kind'])}, {a['expr']})"
     if op == "REPEAT_POST":
@@ -1615,7 +2415,7 @@ def codegen(a):
     if op == "EXPLAIN":
         return f"_dad_explain({json.dumps(a['msg'], ensure_ascii=False)})"
     if op == "CALC_ASK":
-        return "الناتج = _dad_calc_ask(globals(), locals()); _dad_active = الناتج"
+        return "الناتج = _dad_calc_ask(globals(), locals()); result = الناتج; _dad_active = الناتج"
     if op == "CONTINUE_RAW":
         raise DadError("«أكمل» لازم ترتبط بأمر سابق يعطي قيمة.")
     if op == "FOREACH":
@@ -1640,7 +2440,7 @@ def _ensure_exec(code: str, src: str):
 _split_then = split_then
 
 
-FOREACH_RE = re.compile(r"^(?:لكل|كل)\s+([^\W\d]\w*)\s+(?:في|من)\s+(.+?)\s*:?\s*$")
+FOREACH_RE = re.compile(rf"^(?:لكل|كل)\s+({IDENT_PY})\s+(?:في|من)\s+(.+?)\s*:?\s*$")
 
 
 def parse_foreach(body, names):
@@ -1649,13 +2449,24 @@ def parse_foreach(body, names):
     item, remainder = m.group(1), m.group(2).rstrip(":").strip()
     _check_user_name(item)
     if re.match(r"مدى\s*\(", remainder): return None  # old range form
+    head, sep, tail = remainder.partition(" ثم ")
+    if not sep:
+        head, sep, tail = remainder.partition(" ثم")
+    items = items_of(head, names)
+    me = math_expr(items)
     words = tokens(remainder)
     match = names.match_tokens(words, 0) if words else None
-    if not match:
+    if me and (any(x[0] == "raw" for x in items) or "." in head or "(" in head):
+        coll, rest = me[0], tail.strip()
+    elif match:
+        coll, used = match
+        rest = remainder.split(None, used)[used] if len(remainder.split(None, used)) > used else ""
+    elif len(items) == 1 and items[0][0] in ("var", "raw", "word") and re.fullmatch(IDENT_PY, str(items[0][1])):
+        # اسم مجموعة مثل معامل دالة: لكل عنصر في قائمة
+        coll, rest = items[0][1], tail.strip()
+    else:
         label = words[0] if words else remainder
         raise DadError(f"ما أعرف «{label}» — سوّها قائمة أول.", [f"{label} = []"])
-    coll, used = match
-    rest = remainder.split(None, used)[used] if len(remainder.split(None, used)) > used else ""
     names.add(item)
     rest = re.sub(r"^ثم\s+", "", rest)
     inner = _parse_part(rest, names) if rest else None
@@ -1663,14 +2474,214 @@ def parse_foreach(body, names):
     return {"op":"FOREACH", "item":item, "coll":coll, "body":inner}
 
 
-ELSE_RE = re.compile(r"^(وإلا|والا|غير ذلك|وإلا:|والا:)\s*:?\s*$")
+ELSE_RE = re.compile(r"^(وإلا|والا|غير ذلك|وإلا:|والا:|else|otherwise)\s*:?\s*$", re.I)
 
 
 NOTES = []          # ملاحظات وقت التحويل: [(رقم السطر، نص)] — تنطبع مع ✎ ولا توقف البرنامج
 
 
+_QUESTION_START = {nk(w) for w in (
+    "كم", "وش", "شو", "شنو", "ايش", "ما", "ماهو", "ماهي", "هل", "متى", "وين", "اين",
+    "كيف", "شلون", "منو", "اش", "شنهو",
+)}
+_QUESTION_START_EN = {"how", "what", "when", "where", "why", "who"}
+
+
+def _is_question_body(text):
+    """True when the remainder of an اسأل/ask line looks like a real question."""
+    q = text.strip().rstrip("؟?").strip()
+    if not q:
+        return False
+    if q[:1] in "\"'«":
+        return True
+    tk = tokens(q)
+    if not tk:
+        return False
+    if nk(tk[0]) in _QUESTION_START:
+        return len(tk) >= 2
+    if tk[0].lower() in _QUESTION_START_EN:
+        return len(tk) >= 2
+    return False
+
+
+def _trailing_command_split(text):
+    """If a line starts with a command and later commands sit at the end, split them off."""
+    t = text.strip()
+    hits = [h for h in _cmd_words(t) if nk(h[2]) in COMMANDS]
+    if len(hits) < 2 or hits[0][0] != 0:
+        return None
+    first = hits[0]
+    later = hits[1]
+    head = t[:later[0]].strip()
+    tail = t[later[0]:].strip()
+    if not head or not tail:
+        return None
+    return first, head, tail, hits
+
+
+def _bare_command_tail(tail):
+    """True if the tail is only command words (اكمل احسب) with no extra operands."""
+    tk = tokens(tail)
+    if not tk:
+        return False
+    return all(
+        (_cmd_of(w, typo=False) in LOOSE_OK)
+        or (_cmd_of(w, typo=False) in {"IF", "ELIF", "WHILE", "REPEAT"})
+        for w in tk
+    )
+
+
+
+def _soften_english_contractions(text):
+    """what's your name → what is your name, so a typo apostrophe is not a quote error."""
+    return re.sub(r"\b([Ww]hat|[Ww]here|[Ww]ho|[Ww]hen|[Ww]hy|[Hh]ow)'s\b", r"\1 is", text)
+
+
+def _cmd_at_start(text, typo=True):
+    """Command id if this fragment starts with a real command (وقول counts as قول)."""
+    s = text.lstrip()
+    if not s:
+        return None
+    m = re.match(IDENT_CORE, s)
+    if not m:
+        return None
+    w = m.group(0)
+    ok = set(LOOSE_OK) | {"IF", "ELIF", "WHILE", "REPEAT"}
+    c = _cmd_of(w, typo=typo)
+    if c in ok:
+        return c
+    if w.startswith("و") and len(w) > 2:
+        c = _cmd_of(w[1:], typo=False)
+        if c in ok:
+            return c
+    return None
+
+
+_THEN_CONN_RE = re.compile(
+    r"(?P<long>\s+(?:وبعدين|وبعدها|بعدين|عقب)\s+)"
+    r"|(?P<and>\s+and\s+)"
+    r"|(?P<wa>\s+و\s+)"
+    r"|(?P<attach>\s+و(?=\S))",
+    re.I,
+)
+
+
+def _split_then_commands(text):
+    """Split on ثم/then only when the next part starts with a command.
+
+    قول اكل ثم نام — then is speech, one command.
+    قول هلا ثم قول مرحبا — both sides are commands, so chain.
+    احسب 5 ثم نام — mixed (calc + non-command) stays split and errors as before.
+    """
+    positions = []
+    for i, ch, depth in spans(text):
+        if depth != 0:
+            continue
+        if (text.startswith("ثم", i)
+                and (i == 0 or text[i-1].isspace())
+                and (i + 2 == len(text) or text[i + 2].isspace() or text[i + 2] == "(")):
+            positions.append((i, 2))
+        elif (text[i:i+4].lower() == "then"
+                and (i == 0 or not (text[i-1].isalnum() or text[i-1] == "_"))
+                and (i + 4 == len(text) or text[i+4].isspace() or text[i+4] in "(:")):
+            positions.append((i, 4))
+    if not positions:
+        return [text.strip()] if text.strip() else []
+    parts, seps, start = [], [], 0
+    for i, width in positions:
+        parts.append(text[start:i].strip())
+        seps.append(text[i:i+width])
+        start = i + width
+    parts.append(text[start:].strip())
+    out = [parts[0]]
+    for idx, nxt in enumerate(parts[1:]):
+        left = out[-1]
+        left_cmd = _cmd_at_start(left)
+        right_cmd = _cmd_at_start(nxt)
+        # Empty parts after ثم stay split so «قول هلا ثم» / «ثم ثم» still error.
+        if left_cmd == "OUT" and not right_cmd and nxt:
+            sep = seps[idx]
+            out[-1] = f"{left} {sep} {nxt}".strip()
+        else:
+            out.append(nxt)
+    return out
+
+
+def _implicit_kam_or_now(part, names):
+    """Bare «كم الساعة» / «شنو التاريخ» / «كم 4 زائد 5» / «كم جرام في 2 كيلو»."""
+    kind = _now_kind(part)
+    if kind:
+        return {"op": "OUTPUT", "expr": f"_dad_now({kind!r})"}
+    if not re.match(r"^كم(?:\s|$)", part.strip()):
+        return None
+    try:
+        node = parse_calc(part, names)
+    except DadError:
+        return None
+    if node and node.get("op") == "CALC":
+        # Bare «كم 4 زائد 5» / «كم جرام في 2 كيلو» should show the value, not only store it.
+        return {"op": "SEQ", "body": [node, {"op": "OUTPUT", "expr": "الناتج"}]}
+    return None
+
+
+def soften_natural_then(text):
+    """قول هلا و قول مرحبا / بعدين / and → same as ثم, only when both sides are commands."""
+    if not text or " " not in text and "و" not in text:
+        return text, False
+    changed = False
+    # Repeat so «قول 1 و قول 2 و قول 3» all split.
+    for _ in range(8):
+        depth0 = {i for i, _ch, depth in spans(text) if depth == 0}
+        found = False
+        for m in _THEN_CONN_RE.finditer(text):
+            if m.start() not in depth0:
+                continue
+            left = text[:m.start()].strip()
+            right = text[m.end():].strip()
+            # attached «وقول»: drop the leading و from the right if we used attach
+            if m.group("attach") and right.startswith("و"):
+                # shouldn't happen; attach stops before the next word
+                pass
+            if not left or not right:
+                continue
+            if not _cmd_at_start(left) or not _cmd_at_start(right):
+                continue
+            # اسأل ... و احفظ في X is a single ask-and-save, not two commands.
+            if _cmd_at_start(left) == "ASK" and _cmd_at_start(right) == "SAVE":
+                continue
+            text = text[:m.start()] + " ثم " + text[m.end():]
+            changed = True
+            found = True
+            break
+        if not found:
+            break
+    return text, changed
+
+
+def soften_natural_ask(part):
+    """اسأل كم عدد البيض في السلة اكمل احسب → اسأل كم عدد البيض في السلة.
+
+    Trailing bare command words after a complete question are beginner filler
+    ('then go on and calculate'), not a second statement.
+    Returns (rewritten_or_same, optional_note).
+    """
+    split = _trailing_command_split(part)
+    if not split:
+        return part, None
+    first, head, tail, _hits = split
+    if first[3] != "ASK":
+        return part, None
+    question = head[first[1]:].strip()
+    if not _is_question_body(question) or not _bare_command_tail(tail):
+        return part, None
+    fixed = f"{first[2]} {question}".strip()
+    if fixed == part.strip():
+        return part, None
+    return fixed, f"فهمت السؤال كـ: {fixed}"
+
+
 def _command_ambiguity(part):
-    """Reject two possible commands without a separator before any execution."""
+    """Reject two possible commands without a separator, with a copyable fix."""
     t = part.strip()
     if not t or "(" in t.split(None, 1)[0]:
         return None
@@ -1685,14 +2696,79 @@ def _command_ambiguity(part):
     body = t[first[1]:].strip()
     if len(tokens(body)) <= (2 if first[3] == 'ASK' else 1):
         return None
-    if first[0] != (len(t) - len(t.lstrip())) or last[1] != len(t.rstrip("؟?.! ")):
+    if first[0] != (len(t) - len(t.lstrip())):
+        return None
+    # اسأل ... واحفظه في س / ask ... and save it in name — أمر حفظ الجواب، مو أمر ثانٍ.
+    if first[3] == "ASK":
+        body_only = t[first[1]:].strip()
+        if _SAVE_IN_RE.match(body_only) or _INCOMPLETE_SAVE_RE.match(body_only):
+            return None
+    # اسأل + سؤال مكتمل + أمر لاحق معه مدخلات (اكمل زائد 1) — حتى لو الأمر مو آخر كلمة.
+    if first[3] == "ASK":
+        split = _trailing_command_split(t)
+        if split:
+            _f, head, tail, _h = split
+            question = head[first[1]:].strip()
+            if _is_question_body(question) and not _bare_command_tail(tail):
+                options = [
+                    f"{first[2]} {question}".strip(),
+                    f"{first[2]} {question} ثم {tail}".strip(),
+                ]
+                msg = (
+                    f"فيه أمرين بدون «ثم»: «{first[2]}» و«{split[2].split()[0]}». "
+                    "افصل الأوامر بـ «ثم»، أو استخدم السطر المقترح تحت."
+                )
+                return DadError(msg, options)
+    # قول هلا احسب 1 — الأمر الثاني معه مدخلات حتى لو مو آخر كلمة.
+    if first[3] in ("OUT", "CALC"):
+        split = _trailing_command_split(t)
+        if split:
+            _f, head, tail, _h = split
+            content = head[first[1]:].strip()
+            if content and tail:
+                if first[3] == "OUT":
+                    options = [
+                        f"{first[2]} «{content} {tail}»".strip(),
+                        f"{first[2]} {content} ثم {tail}".strip(),
+                    ]
+                else:
+                    options = [
+                        f"{first[2]}({content})".strip(),
+                        f"{first[2]} {content} ثم {tail}".strip(),
+                    ]
+                msg = (
+                    f"فيه أمرين بدون «ثم»: «{first[2]}» و«{tail.split()[0]}». "
+                    "افصل الأوامر بـ «ثم»، أو ضع الكلام الحرفي بين «»."
+                )
+                return DadError(msg, options)
+    if last[1] != len(t.rstrip("؟?.! ")):
         return None
     later = []
     for h in hits[1:]:
         if h[2] not in later:
             later.append(h[2])
     words = " و".join(f"«{w}»" for w in later)
-    return f"فيه أمرين بدون «ثم»: «{first[2]}» و{words}. افصل الأوامر بـ «ثم»، أو ضع الكلام الحرفي بين «»."
+    split = _trailing_command_split(t)
+    options = []
+    if split:
+        _first, head, tail, _hits = split
+        question = head[first[1]:].strip()
+        if first[3] == "ASK" and _is_question_body(question):
+            options.append(f"{first[2]} {question}".strip())
+            options.append(f"{first[2]} {question} ثم {tail}".strip())
+        elif first[3] == "OUT":
+            options.append(f"{first[2]} «{body}»")
+            options.append(f"{head} ثم {tail}".strip())
+        else:
+            options.append(f"{head} ثم {tail}".strip())
+    msg = (
+        f"فيه أمرين بدون «ثم»: «{first[2]}» و{words}. "
+        "افصل الأوامر بـ «ثم»، أو ضع الكلام الحرفي بين «»."
+    )
+    if options:
+        msg += " إذا كان هذا سؤالاً واحداً، استخدم السطر المقترح تحت."
+    return DadError(msg, options or None)
+
 
 
 SOURCE_MAP = []  # generated line -> original Aldad line
@@ -1706,7 +2782,7 @@ def _resolve_continue(node, names):
         text = node['text']
         tk = tokens(text)
         first = nk(tk[0]) if tk else ''
-        if first not in OP_WORDS and (not tk or tk[0] not in ('+', '-', '*', '/', '×', '÷')):
+        if not _op_sym(first) and first not in OP_WORDS and (not tk or tk[0] not in ('+', '-', '*', '/', '×', '÷')):
             raise DadError('«كمل» تحتاج عملية بعد القيمة القديمة، مثل: كمل زائد 2.')
         local = _copy_names(names)
         local.add('القيمة_الفعالة')
@@ -1723,18 +2799,53 @@ def _resolve_continue(node, names):
     return node
 
 
+
+def _fold_leading_keyword(part: str) -> str:
+    """يطابق الأمر حتى لو عليه تشكيل: قُول ← قول، دون المساس بأسماء مثل غيّر_السعر."""
+    raw = part.lstrip()
+    lead = len(part) - len(raw)
+    m = re.match(IDENT_CORE, raw)
+    if not m:
+        return part
+    word = m.group(0)
+    folded = strip_marks(word)
+    keyw = nk(word)
+    known = (
+        keyw in COMMANDS or keyw in _PROTECTED_WORDS or keyw in RESERVED_NAMES
+        or keyw in {nk("عرف"), nk("دالة"), nk("شغل"), nk("اعرض"), nk("وإلا"), nk("والا")}
+    )
+    if not known or folded == word:
+        return part
+    return part[:lead] + folded + raw[m.end():]
+
+
 def _parse_part(part, names):
+    part = _fold_leading_keyword(part)
+    slice_expr = _slice_phrase(part, names)
+    if slice_expr is not None:
+        return {"op": "OUTPUT", "expr": slice_expr}
     if is_media(part): return parse_media(part, names)
     if ELSE_RE.match(part): return {'op': 'ELSE'}
     define = parse_define(part, names)
     if define: return define
     foreach = parse_foreach(part, names)
     if foreach: return foreach
-    part = re.sub(r'^((?:اسأل|أسأل|اسال)\s*)\((.*)\)\s+في\s+([^\W\d]\w*)\s*$', r'\1(\2 في \3)', part)
+    # Natural English if/elif/while without a trailing colon (the Python block form).
+    # `if 10 gt 3 then say "yes"` must not steal `if command == "quit":`.
+    m_en_cond = re.match(r'^(if|elif|while)\s+(.+)$', part, re.I)
+    if (m_en_cond and not part.rstrip().endswith(':')
+            and not re.match(r'^(if|elif|while)\s*\(', part, re.I)):
+        a = parse_cond(m_en_cond.group(2).strip(), names)
+        a["op"] = {"if": "IF", "elif": "ELIF", "while": "WHILE"}[m_en_cond.group(1).lower()]
+        return a
+    part = re.sub(rf'^((?:اسأل|أسأل|اسال)\s*)\((.*)\)\s+في\s+({IDENT_PY})\s*$', r'\1(\2 في \3)', part)
     # Block and inline forms go through the same command parser.
-    match = re.match(r'^(إذا|اذا|لو|وإلا إذا|والا اذا|كرر)\s+(.+?)\s*:?$', part)
-    if match and not part.rstrip().endswith(':'):
-        part = f'{match.group(1)}({match.group(2)})'
+    match = re.match(r'^(إذا|اذا|لو|وإلا إذا|والا اذا|كرر|طالما|rep)\s+(.+?)\s*:?$', part, re.I)
+    if match:
+        cond = match.group(2).strip()
+        if cond.endswith(':'):
+            cond = cond[:-1].strip()
+        part = f'{match.group(1)}({cond})'
     normalized = natural_line(part) or part
     node = parse_statement(normalized, names)
     return _resolve_continue(node, names)
@@ -1761,6 +2872,8 @@ def expand(src: str, initial_names=None):
     """
     global LAST_NAMES
     NOTES.clear(); SOURCE_MAP.clear()
+    src = strip_bidi_outside_strings(src)
+    src = _soften_english_contractions(src)
     check_syntax(src)
     names = _copy_names(initial_names) if initial_names is not None else Names()
     names.first_def = {}
@@ -1769,12 +2882,12 @@ def expand(src: str, initial_names=None):
     declaration_scopes = [(0, -1)]
     # Legacy declarations allow names to be recognized before translation.
     for no, raw in enumerate(lines, 1):
-        body = strip_comment(raw.strip())
+        body = _fold_leading_keyword(strip_comment(raw.strip()))
         if not body: continue
         width = len(raw.expandtabs(4)) - len(raw.expandtabs(4).lstrip())
         while len(declaration_scopes) > 1 and width <= declaration_scopes[-1][1]: declaration_scopes.pop()
         scope = declaration_scopes[-1][0]
-        ident = r'[^\W\d]\w*'
+        ident = IDENT_PY
         binding = re.match(rf'^(\(?\s*{ident}(?:\s*[،,]\s*{ident})*\s*\)?)\s*(?:[+\-*/%]?=)(?!=)', body)
         if binding:
             for label in re.findall(ident, binding.group(1)):
@@ -1790,17 +2903,17 @@ def expand(src: str, initial_names=None):
             if scope == 0: names.functions.add(function.group(1))
         # Diagnose a reserved word in a binding before treating it as a separator.
         if re.match(r'^(?:اسأل|اسال)\s+كم\s+ثم\s*$', body) or re.match(r'^احفظ\s+.+\s+في\s+ثم\s*$', body) or re.search(r'^(?:عرّف|عرف)\s+.+\s+ياخذ\s+ثم(?:\s+و?يرجع\b|$)', body):
-            e = DadError('«ثم» اسم محجوز في لغة الضاد — اختر اسمًا آخر.'); e.line = no; raise e
-        define = re.match(r'^دالة\s+([^\W\d]\w*)', body)
+            e = DadError('«ثم» اسم محجوز في لغة نوفاك — اختر اسمًا آخر.'); e.line = no; raise e
+        define = re.match(rf'^دالة\s+({IDENT_PY})', body)
         if define and scope == 0: names.functions.add(define.group(1))
-        assign = re.match(r'^([^\W\d]\w*)\s*=(?!=)', body)
+        assign = re.match(rf'^({IDENT_PY})\s*=(?!=)', body)
         if assign:
             try: _check_user_name(assign.group(1))
             except DadError as e: e.line = no; raise
             declarations[scope].append(assign.group(1))
             names.first_def.setdefault(key(assign.group(1)), no)
         for m in re.finditer(r'لكل\s+(.+?)\s+في\b', body):
-            for name in re.findall(r'[^\W\d]\w*', m.group(1)):
+            for name in re.findall(rf'{IDENT_PY}', m.group(1)):
                 try: _check_user_name(name)
                 except DadError as e: e.line = no; raise
                 declarations[scope].append(name)
@@ -1813,7 +2926,7 @@ def expand(src: str, initial_names=None):
     out, asts = [], []
     for no, raw in enumerate(lines, 1):
         ind = raw[:len(raw)-len(raw.lstrip())].expandtabs(4)
-        body = strip_comment(raw.strip())
+        body = _fold_leading_keyword(strip_comment(raw.strip()))
         if not body:
             out.append(raw); SOURCE_MAP.append(no); continue
         while len(scopes) > 1 and len(ind) <= scopes[-1][0]: scopes.pop()
@@ -1821,26 +2934,52 @@ def expand(src: str, initial_names=None):
         names.current_line = no
         if body.startswith('ثم ') or body.startswith('ثم\t'):
             body = body[2:].strip()
-        parts = _split_then(body)
+        elif re.match(r'(?i)^then(\s|$)', body):
+            body = body[4:].strip()
+        body, thened = soften_natural_then(body)
+        if thened:
+            NOTES.append((no, "فهمت الفاصل كـ «ثم» بين أمرين"))
+        parts = _split_then_commands(body)
         parsed = []
         try:
             for pos, part in enumerate(parts):
                 if not part:
                     raise DadError('في آخر السطر «ثم» وما بعدها أمر.' if pos == len(parts)-1 else 'فيه «ثم» زيادة — ما في أمر بين «ثم» و«ثم».')
+                softened, hint = soften_natural_ask(part)
+                if hint:
+                    NOTES.append((no, hint))
+                    part = softened
                 note = _command_ambiguity(part)
-                if note: raise DadError(note)
-                if re.fullmatch(r'(?:كرر|كرّر)\s*(?:\(\s*\))?\s*:?', part):
+                if note:
+                    raise note if isinstance(note, DadError) else DadError(note)
+                if re.fullmatch(r'(?:كرر|كرّر|rep)\s*(?:\(\s*\))?\s*:?', part, re.I):
                     raise DadError('حدد كم مرة وشنو تبي تكرر.', ['كرر 3 مرات'])
-                if re.match(r'^كم(?:\s|$)', part) and natural_line(part) is None:
+                impl = _implicit_kam_or_now(part, names)
+                if impl is not None and natural_line(part) is None:
+                    node = impl
+                elif re.match(r'^كم(?:\s|$)', part) and natural_line(part) is None:
                     raise DadError('«كم» كلمة سؤال وليست أمراً لوحدها. اكتب قبلها اسأل أو قول أو احسب.')
-                node = _parse_part(part, names)
+                else:
+                    node = _parse_part(part, names)
                 if node is None:
                     if len(parts) > 1:
                         raise DadError(f'بعد «ثم» لازم يبدأ أمر معروف، وما فهمت «{part}».')
                     # The legacy adapter handles these lines only.
-                    ma = re.match(r'^([^\W\d]\w*)\s*=\s*(.+)$', body)
-                    fi = literal_fi_math(ma.group(2) if ma else body, names)
-                    code = f'{ma.group(1)} = {fi}' if ma and fi is not None else (fi if fi is not None else body)
+                    m_exc = re.match(rf'^(?:except|catch|عند_خطأ)\s+(?:Exception\s+)?(?:باسم|as)\s+({IDENT_PY})\s*:?\s*$', body, re.I)
+                    if m_exc:
+                        names.add(m_exc.group(1))
+                    ma = re.match(rf'^({IDENT_PY})\s*=\s*(.+)$', body)
+                    rhs = ma.group(2) if ma else body
+                    se = _slice_phrase(rhs, names)
+                    fi = literal_fi_math(rhs, names) if se is None else None
+                    if ma and se is not None:
+                        code = f'{ma.group(1)} = {se}'
+                    elif ma and fi is not None:
+                        code = f'{ma.group(1)} = {fi}'
+                    elif fi is not None:
+                        code = fi
+                    else:
+                        code = body
                     out.append(ind+code); SOURCE_MAP.append(no)
                     break
                 if node['op'] == 'REPEAT' and not node.get('body'):
@@ -1864,9 +3003,9 @@ def expand(src: str, initial_names=None):
                     child = _copy_names(names)
                     for label in last['params'] + declarations.get(no, []): child.add(label)
                     scopes.append((len(ind), child))
-                if last['op'] in ('IF', 'ELIF', 'ELSE') or (last['op'] in ('REPEAT', 'FOREACH') and not last.get('body')) or (last['op'] == 'DEFINE' and last.get('return_expr') is None):
+                if last['op'] in ('IF', 'ELIF', 'ELSE', 'WHILE') or (last['op'] in ('REPEAT', 'FOREACH') and not last.get('body')) or (last['op'] == 'DEFINE' and last.get('return_expr') is None):
                     if not _has_block(lines, no):
-                        word = {'IF':'إذا','ELIF':'إذا','ELSE':'وإلا','FOREACH':'لكل','DEFINE':'عرّف','REPEAT':'كرر'}[last['op']]
+                        word = {'IF':'إذا','ELIF':'إذا','ELSE':'وإلا','WHILE':'طالما','FOREACH':'لكل','DEFINE':'عرّف','REPEAT':'كرر'}[last['op']]
                         raise DadError(f'الأسطر اللي تحت «{word}» لازم تكون مزاحة لداخل (اضغط Tab قبلها).', ['⇥ قول هلا'])
         except DadError as e:
             e.line = e.line or no; raise
@@ -1877,19 +3016,41 @@ def expand(src: str, initial_names=None):
 # ============================================================================ دوال التشغيل (تنحقن في البرنامج)
 def _dad_calc(v):
     """نتيجة «احسب» لازم تكون رقم — «سعود» × 4 ما تصير «سعودسعودسعودسعود» بصمت."""
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
+    if isinstance(v, bool) or not isinstance(v, (int, float, complex)):
         shown = str(v)
         shown = shown[:25] + ("…" if len(shown) > 25 else "")
         raise ValueError(f"«احسب» لقت كلام مو رقم (طلع «{shown}») — تأكد إن القيم اللي تحسبها أرقام، مثل جواب «كم».")
-    return _dad_num(v)
+    # Store the full value (number() also rejects huge ints / non-finite floats).
+    # Display rounding happens in _dad_fmt / _dad_show only.
+    return number(v)
 
 
 def _dad_num(v):
-    return int(v) if isinstance(v, float) and v.is_integer() else (round(v, 6) if isinstance(v, float) else v)
+    # Kept for display-compatible integer folding of whole floats.
+    return int(v) if isinstance(v, float) and v.is_integer() else v
+
+
+def _dad_fmt(v):
+    """Display a value: numbers rounded to at most 6 decimals, trailing zeros trimmed."""
+    if isinstance(v, bool):
+        return "صح" if v else "خطأ"
+    if v is None:
+        return "لاشيء"
+    if isinstance(v, BaseException):
+        return str(v)
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    if isinstance(v, float):
+        r = round(v, 6)
+        if r.is_integer() and abs(r) < 1e15:
+            return int(r)
+        s = f"{r:.6f}".rstrip("0").rstrip(".")
+        return s
+    return v
 
 
 def _dad_show(*vals):
-    print(*[('صح' if v else 'خطأ') if isinstance(v, bool) else ('لاشيء' if v is None else _dad_num(v) if isinstance(v, (int, float)) else v) for v in vals])
+    print(*[_dad_fmt(v) for v in vals])
 
 
 def _dad_ask(prompt, numeric=False):
@@ -2013,7 +3174,7 @@ def _dad_media(kind, path):
         print(f"@@DAD_MEDIA@@{kind}|{os.path.abspath(full)}", flush=True)
     else:                                                 # برا الـIDE: نقول وش صار بوضوح
         icon = {"audio": "🔊", "video": "🎬", "image": "🖼"}[kind]
-        print(f"{icon} {MEDIA_AR[kind]}: {p} — يشتغل داخل ضاد IDE.", flush=True)
+        print(f"{icon} {MEDIA_AR[kind]}: {p} — يشتغل داخل نوفاك IDE.", flush=True)
 
 
 def _dad_times(n):
@@ -2056,9 +3217,207 @@ def _dad_read(path):
 def _dad_write(path, value):
     p = path if os.path.isabs(path) else os.path.join(os.environ.get("DAD_OUT_DIR") or os.getcwd(), path)
     with open(p, "w", encoding="utf-8") as f:
-        f.write(str(_dad_num(value) if isinstance(value, (int, float)) else value))
+        f.write(str(value))
     print(f"✓ انحفظ في {os.path.basename(p)}")
 
 
+def _dad_append(path, value):
+    p = path if os.path.isabs(path) else os.path.join(os.environ.get("DAD_OUT_DIR") or os.getcwd(), path)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(str(value))
+    print(f"✓ أُلحق في {os.path.basename(p)}")
+
+
+
+_LIMIT = {"start": None, "n": 0, "max_s": 8.0, "max_i": 1000000}
+
+
+def _dad_limit_settings():
+    """Return cached (max_seconds, max_iters). Call _dad_reset_limits() to refresh."""
+    return _LIMIT["max_s"], _LIMIT["max_i"]
+
+
+def _dad_read_limit(name, default):
+    raw = os.environ.get(name, default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _dad_reset_limits():
+    _LIMIT["max_s"] = _dad_read_limit("DAD_MAX_SECONDS", "8")
+    _LIMIT["max_i"] = int(_dad_read_limit("DAD_MAX_ITERS", "1000000"))
+    _LIMIT["start"] = time.monotonic()
+    _LIMIT["n"] = 0
+
+
+# Check the clock every N ticks (P2). Iteration count is still checked every time.
+_TICK_CLOCK_EVERY = 1024
+
+
+def _dad_tick():
+    """Loop guard: cached limits, no reimports, clock sampled every 1024 iterations."""
+    max_s = _LIMIT["max_s"]
+    max_i = _LIMIT["max_i"]
+    if max_s <= 0 and max_i <= 0:
+        return
+    n = _LIMIT["n"] + 1
+    _LIMIT["n"] = n
+    if max_i > 0 and n > max_i:
+        raise DadError("البرنامج توقف لأن الحلقة دارت مرات أكثر من المسموح.")
+    if max_s > 0 and (n == 1 or (n % _TICK_CLOCK_EVERY) == 0):
+        started = _LIMIT["start"]
+        if started is not None and (time.monotonic() - started) > max_s:
+            raise DadError("البرنامج توقف لأن التشغيل أخذ وقتًا أطول من المسموح.")
+
+
+def _dad_get_active(scope):
+    """Local active value only — a calc outside a function does not feed كمل inside it."""
+    return _runtime_active(scope)
+
+
+def _dad_binop_arith(op, a, b):
+    a, b = number(a), number(b)
+    try:
+        val = op(a, b)
+    except ZeroDivisionError:
+        raise _dad_divzero() from None
+    except (OverflowError, ValueError):
+        raise DadError("قيمة الحساب كبيرة أو غير صالحة لهذه العملية.") from None
+    if isinstance(val, complex):
+        raise DadError("الحساب يعطي عددًا مركبًا؛ الجذر لعدد سالب غير مدعوم.")
+    return number(val)
+
+
+def _dad_div(a, b):
+    import operator
+    return _dad_binop_arith(operator.truediv, a, b)
+
+
+def _dad_floordiv(a, b):
+    import operator
+    return _dad_binop_arith(operator.floordiv, a, b)
+
+
+def _dad_mod(a, b):
+    import operator
+    return _dad_binop_arith(operator.mod, a, b)
+
+
+def _dad_pow(a, b):
+    """Checked exponentiation, same limits as evaluate()."""
+    import math
+    a, b = number(a), number(b)
+    if isinstance(b, float) and b.is_integer():
+        b = int(b)
+    if isinstance(b, int) and b >= 0 and isinstance(a, int) and abs(a) > 1:
+        estimated_bits = int(math.log2(abs(a)) * b) + 1
+        if estimated_bits > 13000:
+            raise DadError("النتيجة كبيرة جدًا — استخدم أرقامًا أصغر أو قسّم الحساب إلى خطوات.")
+    elif isinstance(b, (int, float)) and b > 4096 and abs(a) > 1:
+        raise DadError("النتيجة كبيرة جدًا — استخدم أرقامًا أصغر أو قسّم الحساب إلى خطوات.")
+    try:
+        val = a ** b
+    except ZeroDivisionError:
+        raise _dad_divzero() from None
+    except (OverflowError, ValueError):
+        raise DadError("قيمة الحساب كبيرة أو غير صالحة لهذه العملية.") from None
+    if isinstance(val, complex):
+        raise DadError("الحساب يعطي عددًا مركبًا؛ الجذر لعدد سالب غير مدعوم.")
+    return number(val)
+
+
+def _dad_divzero():
+    return dad_divzero()
+
+
+def _dad_unknown_name(err):
+    m = re.search(r"name '([^']+)' is not defined", str(err))
+    shown = (m.group(1).replace("_", " ") if m else str(err))
+    return DadError(f"«{shown}» غير معروف — عرّفه أو اسأل عنه أولًا.")
+
+
+def _dad_run(fn):
+    """Run a lowered static calc/return expression, preserving Arabic errors."""
+    try:
+        v = fn()
+    except ZeroDivisionError:
+        raise _dad_divzero() from None
+    except OverflowError:
+        raise DadError("قيمة الحساب كبيرة أو غير صالحة لهذه العملية.") from None
+    except NameError as e:
+        raise _dad_unknown_name(e) from None
+    if isinstance(v, complex):
+        raise DadError("الحساب يعطي عددًا مركبًا؛ الجذر لعدد سالب غير مدعوم.")
+    return _dad_calc(v)
+
+
+def _dad_slice(seq, start, end=None):
+    """1-based inclusive slicing for beginners.
+
+    قطعة القائمة من 1 إلى 3  /  slice list from 1 to 3
+    means the first, second and third items (Python list[0:3]).
+    Index 1 is the first item. Both ends are included. 0 or negative is an error.
+    If the end is omitted, the slice runs to the end of the sequence.
+    """
+    if not hasattr(seq, "__getitem__"):
+        raise DadError("القطع يحتاج قائمة أو نصاً.")
+    try:
+        s = int(start)
+    except (TypeError, ValueError):
+        raise DadError("بداية القطع لازم تكون رقماً صحيحاً يبدأ من 1.") from None
+    if s < 1:
+        raise DadError("القطع يبدأ من 1 (العنصر الأول)، ليس من 0. / Slicing is 1-based: 1 is the first item.")
+    if end is None:
+        return seq[s - 1:]
+    try:
+        e = int(end)
+    except (TypeError, ValueError):
+        raise DadError("نهاية القطع لازم تكون رقماً صحيحاً.") from None
+    if e < 1:
+        raise DadError("القطع يبدأ من 1 (العنصر الأول)، ليس من 0. / Slicing is 1-based: 1 is the first item.")
+    if e < s:
+        return seq[0:0]
+    return seq[s - 1:e]
+
+
+def inject_loop_guards(tree: py_ast.AST) -> py_ast.AST:
+
+    class _Guards(py_ast.NodeTransformer):
+        def _wrap(self, node):
+            self.generic_visit(node)
+            tick_node = py_ast.Expr(
+                value=py_ast.Call(func=py_ast.Name(id="_dad_tick", ctx=py_ast.Load()), args=[], keywords=[])
+            )
+            py_ast.copy_location(tick_node, node)
+            body = list(node.body)
+            if body and isinstance(body[0], py_ast.Expr) and isinstance(getattr(body[0], "value", None), py_ast.Call):
+                func = body[0].value.func
+                if isinstance(func, py_ast.Name) and func.id == "_dad_tick":
+                    return node
+            node.body = [tick_node] + body
+            return node
+
+        def visit_For(self, node):
+            return self._wrap(node)
+
+        def visit_While(self, node):
+            return self._wrap(node)
+
+    return _Guards().visit(tree)
+
+
+def compile_user_code(code: str, filename: str, mode="exec"):
+    """Compile generated Python and inject loop/time guards without shifting line numbers."""
+    _dad_reset_limits()
+    if mode == "eval":
+        return compile(code, filename, "eval")
+    tree = py_ast.parse(code, filename=filename, mode="exec")
+    tree = inject_loop_guards(tree)
+    py_ast.fix_missing_locations(tree)
+    return compile(tree, filename, "exec")
+
+
 RUNTIME = {"_dad_evaluate": evaluate, "_dad_media": _dad_media, "_dad_calc": _dad_calc, "_dad_times": _dad_times, "_dad_explain": _dad_explain, "_dad_calc_ask": _dad_calc_ask, "_dad_mean": _dad_mean, "_dad_bool": _dad_bool, "_dad_now": _dad_now, "_dad_note": _dad_note, "_dad_num": _dad_num, "_dad_show": _dad_show, "_dad_ask": _dad_ask, "_dad_count": _dad_count,
-           "_dad_svg": _dad_svg, "_dad_read": _dad_read, "_dad_write": _dad_write}
+           "_dad_svg": _dad_svg, "_dad_read": _dad_read, "_dad_write": _dad_write, "_dad_append": _dad_append, "_dad_fmt": _dad_fmt, "_dad_tick": _dad_tick, "_dad_reset_limits": _dad_reset_limits, "_dad_run": _dad_run, "_dad_slice": _dad_slice, "_dad_divzero": _dad_divzero, "_dad_unknown_name": _dad_unknown_name, "DadError": DadError, "_dad_get_active": _dad_get_active, "_dad_pow": _dad_pow, "_dad_div": _dad_div, "_dad_floordiv": _dad_floordiv, "_dad_mod": _dad_mod}

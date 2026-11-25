@@ -5,7 +5,7 @@ set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
 echo ======================================
-echo       ALDAD 1.9 - CHECK/REPAIR
+echo       NOVAQ 1.9 - CHECK/REPAIR
 echo ======================================
 echo Folder: %CD%
 echo.
@@ -44,7 +44,7 @@ goto END
 echo [OK] Python found: %FOUND%
 %FOUND% --version
 echo.
-echo Testing Aldad engine...
+echo Testing Novaq engine...
 %FOUND% dad.py run example.dad
 if errorlevel 1 (
   echo.

@@ -35,6 +35,83 @@ OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
        ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod}
 
 
+
+DIVZERO_MSG = "قسمة على صفر — ما ينفع تقسم على صفر. / Division by zero."
+
+
+class DadZeroDivisionError(DadError, ZeroDivisionError):
+    """Catchable by حاول/try/except/catch and still printed as a DadError."""
+
+
+def dad_divzero():
+    return DadZeroDivisionError(DIVZERO_MSG)
+
+
+# Built-ins and their Arabic twins, for احسب/calc function calls.
+CALC_BUILTINS = {
+    "abs": abs, "len": len, "int": int, "float": float, "round": round,
+    "sum": sum, "max": max, "min": min, "pow": pow, "divmod": divmod,
+    "طول": len, "صحيح": int, "عشري": float, "مطلق": abs, "قرب": round,
+    "مجموع": sum, "أكبر": max, "أصغر": min, "قوة": pow,
+}
+_CALC_DENY = {
+    "eval", "exec", "compile", "__import__", "open", "input", "breakpoint",
+    "exit", "quit", "globals", "locals", "vars", "dir", "getattr", "setattr",
+    "delattr", "memoryview", "print", "classmethod", "staticmethod",
+}
+
+
+def _resolve_calc_func(node, walk, local_scope, global_scope):
+    if isinstance(node.func, ast.Name):
+        fname = node.func.id
+        if fname in _CALC_DENY or (fname.startswith("_") and fname not in ("_dad_mean", "_dad_count")):
+            raise DadError("هذا الحساب يحتوي دالة غير مدعومة.")
+        if fname == "_dad_count":
+            return "_dad_count"
+        if fname in local_scope and callable(local_scope[fname]):
+            return local_scope[fname]
+        if fname in global_scope and callable(global_scope[fname]):
+            return global_scope[fname]
+        if fname in CALC_BUILTINS:
+            return CALC_BUILTINS[fname]
+        raise DadError(f"هذا الحساب يحتوي دالة غير مدعومة («{fname}»).")
+    if isinstance(node.func, ast.Attribute):
+        obj = walk(node.func.value)
+        attr = node.func.attr
+        if attr.startswith("_") or attr in _CALC_DENY:
+            raise DadError("هذا الحساب يحتوي دالة غير مدعومة.")
+        fn = getattr(obj, attr, None)
+        if not callable(fn):
+            raise DadError("هذا الحساب يحتوي دالة غير مدعومة.")
+        return fn
+    raise DadError("هذا الحساب يحتوي دالة غير مدعومة.")
+
+
+def _call_calc_function(node, walk, local_scope, global_scope):
+    fn = _resolve_calc_func(node, walk, local_scope, global_scope)
+    if fn == "_dad_count":
+        if len(node.args) != 1 or node.keywords:
+            raise DadError("حساب العدد يحتاج قيمة واحدة.")
+        value = walk(node.args[0])
+        return len(value) if isinstance(value, (list, tuple, dict, set)) else number(value)
+    args = [walk(a) for a in node.args]
+    kwargs = {kw.arg: walk(kw.value) for kw in node.keywords if kw.arg}
+    # Keep the old checked path for sum/max/min on a single list argument.
+    if fn in (sum, max, min) and len(args) == 1 and not kwargs and isinstance(args[0], (list, tuple)):
+        nums = [number(x) for x in args[0]]
+        if fn in (max, min) and not nums:
+            raise DadError("القائمة فارغة — لا توجد قيمة أكبر أو أصغر.")
+        return fn(nums)
+    try:
+        return fn(*args, **kwargs)
+    except ZeroDivisionError:
+        raise dad_divzero() from None
+    except DadError:
+        raise
+    except Exception as e:
+        raise DadError(f"فشل نداء الدالة في الحساب ({type(e).__name__}).") from e
+
+
 def evaluate(expr, global_scope, local_scope, continuing=False):
     """Evaluate the parser's numeric AST; operands are checked before operators.
 
@@ -67,24 +144,14 @@ def evaluate(expr, global_scope, local_scope, continuing=False):
                 elif isinstance(b, (int, float)) and b > 4096 and abs(a) > 1:
                     _too_large()
             try: val = OPS[type(node.op)](a, b)
-            except ZeroDivisionError: raise DadError("قسمة على صفر — ما ينفع تقسم على صفر.") from None
+            except ZeroDivisionError: raise dad_divzero() from None
             except (OverflowError, ValueError): raise DadError("قيمة الحساب كبيرة أو غير صالحة لهذه العملية.") from None
             if isinstance(val, complex): raise DadError("الحساب يعطي عددًا مركبًا؛ الجذر لعدد سالب غير مدعوم.")
             return number(val)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 1 and not node.keywords:
-            fname = node.func.id
-            if fname not in ("sum", "max", "min", "_dad_mean", "_dad_count"):
-                raise DadError("هذا الحساب يحتوي دالة غير مدعومة.")
-            value = walk(node.args[0])
-            if fname == "_dad_count":
-                return len(value) if isinstance(value, (list, tuple, dict, set)) else number(value)
-            if not isinstance(value, (list, tuple)):
-                raise DadError("حساب المجموع أو المتوسط أو أكبر/أصغر قيمة يحتاج قائمة أرقام.")
-            nums = [number(x) for x in value]
-            if fname in ("max", "min") and not nums:
-                raise DadError("القائمة فارغة — لا توجد قيمة أكبر أو أصغر.")
-            return {"sum": lambda: sum(nums), "max": lambda: max(nums), "min": lambda: min(nums),
-                    "_dad_mean": lambda: sum(nums)/len(nums) if nums else 0}[fname]()
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return [walk(elt) for elt in node.elts]
+        if isinstance(node, ast.Call):
+            return _call_calc_function(node, walk, local_scope, global_scope)
         raise DadError("هذا التعبير غير مدعوم في الحساب.")
 
     return number(walk(tree.body))
